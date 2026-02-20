@@ -23,8 +23,10 @@ class FacultyResponse(BaseModel):
         from_attributes = True
 
 
+# ✅ UPDATED RESPONSE
 class FacultyCreateResponse(BaseModel):
     faculty: FacultyResponse
+    activation_email_sent: bool
     message: str
 
 

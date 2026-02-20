@@ -22,7 +22,7 @@ async def create_faculty(
     image_bytes: bytes | None = None,
     image_content_type: str | None = None,
     image_filename: str | None = None,
-) -> Faculty:
+) -> tuple[Faculty, bool]:
     # check existing
     q = await db.execute(select(Faculty).where(Faculty.email == payload.email))
     existing = q.scalar_one_or_none()
@@ -57,23 +57,29 @@ async def create_faculty(
 
     # activation URL (frontend page) OR API activation endpoint
     frontend_base = os.getenv("FRONTEND_BASE_URL", "").rstrip("/")
-    api_base = os.getenv("API_BASE_URL", "").rstrip("/")  # optional if you want
+    # api_base is optional; keeping for future use
+    api_base = os.getenv("API_BASE_URL", "").rstrip("/")
 
-    # Recommended: frontend activation page
     if frontend_base:
         activate_url = f"{frontend_base}/activate?token={token}"
     else:
         # fallback: activate directly hitting API
-        # NOTE: adjust /api if your app uses that prefix
-        activate_url = f"http://31.97.230.171:8000/api/faculty/activate?token={token}"
+        activate_url = "http://31.97.230.171:8000/api/faculty/activate?token=" + token
 
-    await send_activation_email(
-        to_email=faculty.email,
-        to_name=faculty.full_name,
-        activate_url=activate_url,
-    )
+    # ✅ IMPORTANT FIX: do not crash if email not configured
+    email_sent = False
+    try:
+        await send_activation_email(
+            to_email=faculty.email,
+            to_name=faculty.full_name,
+            activate_url=activate_url,
+        )
+        email_sent = True
+    except Exception as e:
+        # don't fail the API if email isn't configured
+        print(f"[WARN] Activation email not sent for {faculty.email}: {e}")
 
-    return faculty
+    return faculty, email_sent
 
 
 async def activate_faculty(token: str, db: AsyncSession) -> None:
