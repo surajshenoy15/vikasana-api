@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -71,7 +71,21 @@ async def list_faculty(
     items = q.scalars().all()
     return [FacultyResponse.model_validate(x) for x in items]
 
-
+@router.delete("/{faculty_id}", summary="Delete faculty member")
+async def delete_faculty(
+    faculty_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    from sqlalchemy import select
+    from app.models.faculty import Faculty
+    result = await db.execute(select(Faculty).where(Faculty.id == faculty_id))
+    faculty = result.scalar_one_or_none()
+    if not faculty:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+    await db.delete(faculty)
+    await db.commit()
+    return {"detail": f"Faculty {faculty_id} deleted"}
 @router.get(
     "/activate",
     response_model=ActivateFacultyResponse,
