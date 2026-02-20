@@ -9,8 +9,8 @@ class Settings(BaseSettings):
     """
 
     # ── Database ──────────────────────────────────────────
-    DATABASE_URL: str       # asyncpg — used by FastAPI
-    DATABASE_SYNC_URL: str  # psycopg2 — used only by Alembic
+    DATABASE_URL: str
+    DATABASE_SYNC_URL: str
 
     # ── JWT ───────────────────────────────────────────────
     SECRET_KEY: str
@@ -23,12 +23,25 @@ class Settings(BaseSettings):
     # ── App ───────────────────────────────────────────────
     APP_ENV: str = "production"
     DEBUG: bool = False
-    MINIO_ENDPOINT: str
-    MINIO_ACCESS_KEY: str
-    MINIO_SECRET_KEY: str
+
+    # ── MinIO ─────────────────────────────────────────────
+    MINIO_ENDPOINT: str = "127.0.0.1:9000"
+    MINIO_ACCESS_KEY: str = ""
+    MINIO_SECRET_KEY: str = ""
     MINIO_BUCKET: str = "vikasana-faculty"
     MINIO_SECURE: bool = False
-    MINIO_PUBLIC_URL: str | None = None  # optional (if you want public file links)
+    MINIO_PUBLIC_BASE: str = ""
+
+    # ── Email (Brevo / Sendinblue) ────────────────────────
+    SENDINBLUE_API_KEY: str = ""
+    EMAIL_FROM: str = "admin@vikasana.org"
+    EMAIL_FROM_NAME: str = "Vikasana Foundation"
+
+    # ── Faculty Activation ────────────────────────────────
+    FRONTEND_BASE_URL: str = "http://localhost:5173"
+    ACTIVATION_TOKEN_SECRET: str = "secret"
+    ACTIVATION_TOKEN_EXPIRE_HOURS: int = 48
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -36,7 +49,6 @@ class Settings(BaseSettings):
 
     @property
     def origins_list(self) -> list[str]:
-        """Splits comma-separated ALLOWED_ORIGINS into a list."""
         return [o.strip() for o in self.ALLOWED_ORIGINS.split(",")]
 
 
@@ -45,5 +57,4 @@ def get_settings() -> Settings:
     return Settings()
 
 
-# Single instance used across the entire app
 settings = get_settings()
