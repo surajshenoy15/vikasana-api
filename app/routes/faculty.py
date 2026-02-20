@@ -1,11 +1,17 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin
 from app.models.admin import Admin
-from app.schemas.faculty import FacultyCreateResponse, FacultyResponse, ActivateFacultyResponse
-from app.schemas.faculty import FacultyCreateRequest
+from app.models.faculty import Faculty
+from app.schemas.faculty import (
+    FacultyCreateResponse,
+    FacultyResponse,
+    ActivateFacultyResponse,
+    FacultyCreateRequest,
+)
 from app.controllers.faculty_controller import create_faculty, activate_faculty
 
 router = APIRouter(prefix="/faculty", tags=["Faculty"])
@@ -31,7 +37,7 @@ async def add_faculty(
     if image:
         image_bytes = await image.read()
 
-    faculty = await create_faculty(
+    faculty, email_sent = await create_faculty(
         payload=payload,
         db=db,
         image_bytes=image_bytes,
@@ -39,10 +45,31 @@ async def add_faculty(
         image_filename=image.filename if image else None,
     )
 
+    message = (
+        "Faculty created and activation email sent."
+        if email_sent
+        else "Faculty created, but activation email could not be sent (email not configured)."
+    )
+
     return {
         "faculty": FacultyResponse.model_validate(faculty),
-        "message": "Faculty created and activation email sent.",
+        "activation_email_sent": email_sent,
+        "message": message,
     }
+
+
+@router.get(
+    "",
+    response_model=list[FacultyResponse],
+    summary="List faculty (Admin only)",
+)
+async def list_faculty(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    q = await db.execute(select(Faculty).order_by(Faculty.created_at.desc()))
+    items = q.scalars().all()
+    return [FacultyResponse.model_validate(x) for x in items]
 
 
 @router.get(
