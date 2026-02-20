@@ -23,7 +23,12 @@ class Settings(BaseSettings):
     # ── App ───────────────────────────────────────────────
     APP_ENV: str = "production"
     DEBUG: bool = False
-
+    MINIO_ENDPOINT: str
+    MINIO_ACCESS_KEY: str
+    MINIO_SECRET_KEY: str
+    MINIO_BUCKET: str = "vikasana-faculty"
+    MINIO_SECURE: bool = False
+    MINIO_PUBLIC_URL: str | None = None  # optional (if you want public file links)
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
