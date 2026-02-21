@@ -92,6 +92,11 @@ async def create_faculty(
 
     token = create_activation_token(payload.email)
     token_hash = hash_token(token)
+    print("\n================ ACTIVATION TOKEN ================")
+    print(f"EMAIL: {payload.email}")
+    print(f"TOKEN: {token}")
+    print(f"URL : http://31.97.230.171:8000/api/faculty/activation/validate?token={token}")
+    print("==================================================\n")
 
     faculty = Faculty(
         full_name=payload.full_name,
