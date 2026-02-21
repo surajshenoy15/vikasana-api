@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin
 from app.models.admin import Admin
 from app.models.faculty import Faculty
+from app.models.student import Student
 
 from app.schemas.faculty import (
     FacultyCreateResponse,
@@ -25,12 +26,10 @@ from app.schemas.faculty_activation import (
 
 from app.controllers.faculty_controller import (
     create_faculty,
-    # NEW FLOW
     validate_activation_token_and_create_session,
     send_activation_otp,
     verify_activation_otp,
     set_password_after_otp,
-    # OPTIONAL old flow (keep if you want)
     activate_faculty,
 )
 
@@ -107,6 +106,21 @@ async def delete_faculty(
     return {"detail": f"Faculty {faculty_id} deleted"}
 
 
+# ✅ NEW: DASHBOARD STATS (fixes 404 for /api/faculty/dashboard/stats)
+@router.get("/dashboard/stats", summary="Faculty dashboard stats")
+async def dashboard_stats(
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),  # keep as admin-only; change to faculty if needed
+):
+    total_students = await db.scalar(select(func.count()).select_from(Student))
+    total_faculty = await db.scalar(select(func.count()).select_from(Faculty))
+
+    return {
+        "total_students": int(total_students or 0),
+        "total_faculty": int(total_faculty or 0),
+    }
+
+
 # =========================================================
 # ✅ NEW ACTIVATION FLOW (OTP + Set Password)
 # =========================================================
@@ -168,7 +182,6 @@ async def activation_set_password(
 
 # =========================================================
 # OPTIONAL: OLD ACTIVATE ENDPOINT (not recommended)
-# Keep only if you want backward compatibility
 # =========================================================
 
 @router.get(
