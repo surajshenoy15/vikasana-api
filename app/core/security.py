@@ -7,23 +7,41 @@ from app.core.config import settings
 # "deprecated=auto" → old hashes are silently re-hashed on next login
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Constant-time dummy hash used when no real hash exists,
+# prevents timing attacks that could reveal valid emails.
+_DUMMY_HASH = "$2b$12$KIXa8pRj6u8OjKvI7bQsqOEkBqYHqFbY3Ku.Fsp7p/e8XGJ0XOGK6"
+
 
 def hash_password(plain: str) -> str:
     """
-    Hash a plaintext password with bcrypt.
+    Hash a plaintext password with bcrypt via passlib.
     bcrypt automatically generates a unique salt — same password gives
     a different hash each time, which is correct and expected.
     """
     return pwd_context.hash(plain)
 
 
-def verify_password(plain: str, hashed: str) -> bool:
+def verify_password(plain: str, hashed: str | None) -> bool:
     """
-    Timing-safe comparison.
-    Takes the same time whether the password is right or wrong.
-    This prevents attackers from measuring response time to guess passwords.
+    Timing-safe bcrypt comparison via passlib.
+
+    Guards against:
+      - None hash  (account has no password set yet)
+      - Truncated / malformed hash  (DB column too narrow, or written by
+        raw bcrypt instead of passlib — both produce a ValueError in passlib)
+      - Timing attacks  (always runs a bcrypt verify, even on dummy hash)
     """
-    return pwd_context.verify(plain, hashed)
+    if not hashed or len(hashed) < 59:
+        # Run dummy verify so response time is identical — prevents
+        # attackers from detecting "no password set" via timing.
+        pwd_context.verify(plain, _DUMMY_HASH)
+        return False
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:
+        # Malformed hash slipped through length check — still safe
+        pwd_context.verify(plain, _DUMMY_HASH)
+        return False
 
 
 # ── JWT Token ─────────────────────────────────────────────────────────

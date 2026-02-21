@@ -20,7 +20,10 @@ from app.core.faculty_tokens import (
     activation_expiry_dt,
 )
 
-import bcrypt
+# ✅ Use ONLY passlib via security.py — never import raw bcrypt directly.
+# This ensures hash_password() and verify_password() always use the same
+# bcrypt implementation and format, preventing the passlib checksum error.
+from app.core.security import hash_password
 
 
 # ---------------------------
@@ -58,11 +61,6 @@ def hash_otp(otp: str) -> str:
 
 def constant_time_equals(a: str, b: str) -> bool:
     return hmac.compare_digest(a, b)
-
-
-def hash_password(pw: str) -> str:
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(pw.encode("utf-8"), salt).decode("utf-8")
 
 
 # ---------------------------
@@ -116,7 +114,6 @@ async def create_faculty(
 
     # activation URL (frontend page) OR API activation endpoint
     frontend_base = os.getenv("FRONTEND_BASE_URL", "").rstrip("/")
-    api_base = os.getenv("API_BASE_URL", "").rstrip("/")
 
     if frontend_base:
         activate_url = f"{frontend_base}/activate?token={token}"
@@ -268,8 +265,6 @@ async def verify_activation_otp(
     sess.otp_verified_at = datetime.now(timezone.utc)
     await db.commit()
 
-    # Reuse your itsdangerous token system to issue short-lived token
-    # We'll store a purpose field in token payload and verify it later.
     s_secret = os.getenv("ACTIVATION_TOKEN_SECRET", "change-me")
     from itsdangerous import URLSafeTimedSerializer
     s = URLSafeTimedSerializer(secret_key=s_secret, salt="faculty-activation")
@@ -285,6 +280,9 @@ async def set_password_after_otp(
 ) -> None:
     """
     Sets password, activates account, clears activation token, deletes session.
+
+    ✅ Uses hash_password() from security.py (passlib/bcrypt) — the same
+       function used everywhere else — so verify_password() will always work.
     """
     # Validate token (15 min)
     s_secret = os.getenv("ACTIVATION_TOKEN_SECRET", "change-me")
@@ -314,10 +312,10 @@ async def set_password_after_otp(
     if not faculty:
         raise HTTPException(status_code=404, detail="Faculty not found")
 
-    # Set password + activate
-    faculty.password_hash = hash_password(new_password)
-    faculty.password_set_at = datetime.now(timezone.utc)
-    faculty.is_active = True
+    # ✅ hash_password() imported from security.py — uses passlib, not raw bcrypt
+    faculty.password_hash     = hash_password(new_password)
+    faculty.password_set_at   = datetime.now(timezone.utc)
+    faculty.is_active         = True
 
     # Clear activation token fields (single-use link)
     faculty.activation_token_hash = None
@@ -330,7 +328,6 @@ async def set_password_after_otp(
 
 # ----------------------------------------------------------
 # OPTIONAL: Keep old activate_faculty() for backward compatibility
-# (but do NOT use it in frontend anymore)
 # ----------------------------------------------------------
 
 async def activate_faculty(token: str, db: AsyncSession) -> None:
