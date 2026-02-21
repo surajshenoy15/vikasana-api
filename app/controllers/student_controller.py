@@ -1,3 +1,4 @@
+import os
 import csv
 import io
 from typing import List, Tuple
@@ -5,30 +6,55 @@ from typing import List, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.student import Student
+from app.models.student import Student, StudentType
 from app.schemas.student import StudentCreate
+from app.core.email_service import send_student_welcome_email
 
 
 def _clean(v: str) -> str:
     return (v or "").strip()
 
 
+def _parse_student_type(v: str) -> StudentType:
+    x = (v or "").strip().upper()
+    if x in ("DIPLOMA", "DIPLOMA_SCHEME", "DIPLOMA SCHEME"):
+        return StudentType.DIPLOMA
+    return StudentType.REGULAR
+
+
 async def create_student(db: AsyncSession, payload: StudentCreate) -> Student:
-    # check duplicate by USN
+    # duplicate by USN
     existing = await db.execute(select(Student).where(Student.usn == payload.usn))
     if existing.scalar_one_or_none():
         raise ValueError(f"Duplicate USN: {payload.usn}")
+
+    # duplicate by email (only if provided)
+    if payload.email:
+        e2 = await db.execute(select(Student).where(Student.email == str(payload.email)))
+        if e2.scalar_one_or_none():
+            raise ValueError(f"Duplicate Email: {payload.email}")
 
     s = Student(
         name=payload.name.strip(),
         usn=payload.usn.strip(),
         branch=payload.branch.strip(),
+        email=str(payload.email) if payload.email else None,
+        student_type=StudentType(payload.student_type),
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
     )
     db.add(s)
     await db.commit()
     await db.refresh(s)
+
+    # ✅ Send welcome email (non-blocking failure)
+    if s.email:
+        try:
+            app_url = os.getenv("STUDENT_APP_DOWNLOAD_URL", "https://vikasana.org/app")
+            await send_student_welcome_email(to_email=s.email, to_name=s.name, app_download_url=app_url)
+        except Exception as e:
+            print(f"[WARN] Student welcome email not sent for {s.email}: {e}")
+
     return s
 
 
@@ -38,19 +64,18 @@ async def create_students_from_csv(
     skip_duplicates: bool = True,
 ) -> Tuple[int, int, int, int, List[str]]:
     """
-    Returns:
-      total_rows, inserted, skipped_duplicates, invalid_rows, errors
-    CSV headers expected:
+    CSV headers expected (required):
       name, usn, branch, passout_year, admitted_year
+    Optional:
+      email, student_type
     """
     errors: List[str] = []
     inserted = 0
     skipped = 0
     invalid = 0
 
-    # read csv safely
     try:
-        text = csv_bytes.decode("utf-8-sig")  # handles UTF-8 with BOM also
+        text = csv_bytes.decode("utf-8-sig")
     except Exception:
         text = csv_bytes.decode("utf-8", errors="replace")
 
@@ -58,16 +83,17 @@ async def create_students_from_csv(
     required = {"name", "usn", "branch", "passout_year", "admitted_year"}
 
     if not reader.fieldnames:
-        return (0, 0, 0, 0, ["CSV has no headers. Required headers: name, usn, branch, passout_year, admitted_year"])
+        return (0, 0, 0, 0, ["CSV has no headers. Required: name, usn, branch, passout_year, admitted_year"])
 
-    missing = required - set([h.strip() for h in reader.fieldnames])
+    headers = set([h.strip() for h in reader.fieldnames])
+    missing = required - headers
     if missing:
         return (0, 0, 0, 0, [f"Missing headers: {', '.join(sorted(missing))}"])
 
     rows = list(reader)
     total_rows = len(rows)
 
-    for idx, row in enumerate(rows, start=2):  # 1 is header row
+    for idx, row in enumerate(rows, start=2):
         try:
             name = _clean(row.get("name"))
             usn = _clean(row.get("usn"))
@@ -75,10 +101,13 @@ async def create_students_from_csv(
             passout_year = int(_clean(row.get("passout_year")))
             admitted_year = int(_clean(row.get("admitted_year")))
 
+            email = _clean(row.get("email")) if "email" in headers else ""
+            stype = _clean(row.get("student_type")) if "student_type" in headers else ""
+
             if not name or not usn or not branch:
                 raise ValueError("name/usn/branch cannot be empty")
 
-            # duplicate check
+            # dup USN
             res = await db.execute(select(Student).where(Student.usn == usn))
             if res.scalar_one_or_none():
                 if skip_duplicates:
@@ -86,10 +115,21 @@ async def create_students_from_csv(
                     continue
                 raise ValueError(f"Duplicate USN: {usn}")
 
+            # dup Email
+            if email:
+                res2 = await db.execute(select(Student).where(Student.email == email))
+                if res2.scalar_one_or_none():
+                    if skip_duplicates:
+                        skipped += 1
+                        continue
+                    raise ValueError(f"Duplicate Email: {email}")
+
             s = Student(
                 name=name,
                 usn=usn,
                 branch=branch,
+                email=email or None,
+                student_type=_parse_student_type(stype),
                 passout_year=passout_year,
                 admitted_year=admitted_year,
             )
