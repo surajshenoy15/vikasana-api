@@ -34,9 +34,10 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
-    stmt = select(Student)
+    # ✅ IMPORTANT: scope students to this faculty's college
+    stmt = select(Student).where(Student.college == current_faculty.college)
 
-    # Search
+    # Search (within same college)
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(
@@ -50,7 +51,6 @@ async def list_students(
 
     # Filters
     if student_type and student_type.strip():
-        # Stored as enum in DB; comparing with string works fine in SQLAlchemy
         stmt = stmt.where(Student.student_type == student_type.strip().upper())
 
     if branch and branch.strip():
@@ -75,7 +75,8 @@ async def add_student_manual(
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
     try:
-        return await create_student(db, payload)
+        # ✅ enforce college from logged-in faculty
+        return await create_student(db, payload, current_faculty.college)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -83,7 +84,7 @@ async def add_student_manual(
 @router.post("/bulk-upload", response_model=BulkUploadResult)
 async def add_students_bulk(
     file: UploadFile = File(...),
-    skip_duplicates: bool = Query(True, description="If true, existing USNs will be skipped"),
+    skip_duplicates: bool = Query(True, description="If true, existing USNs/emails (in same college) will be skipped"),
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
@@ -92,10 +93,12 @@ async def add_students_bulk(
 
     data = await file.read()
 
+    # ✅ enforce college from logged-in faculty
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
         db=db,
         csv_bytes=data,
         skip_duplicates=skip_duplicates,
+        faculty_college=current_faculty.college,
     )
 
     return BulkUploadResult(

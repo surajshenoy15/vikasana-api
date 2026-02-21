@@ -20,6 +20,9 @@ class Student(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
+    # ✅ NEW: College isolation
+    college: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     usn: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     branch: Mapped[str] = mapped_column(String(80), nullable=False)

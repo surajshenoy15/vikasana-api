@@ -22,19 +22,28 @@ def _parse_student_type(v: str) -> StudentType:
     return StudentType.REGULAR
 
 
-async def create_student(db: AsyncSession, payload: StudentCreate) -> Student:
-    # duplicate by USN
-    existing = await db.execute(select(Student).where(Student.usn == payload.usn))
-    if existing.scalar_one_or_none():
-        raise ValueError(f"Duplicate USN: {payload.usn}")
+async def create_student(db: AsyncSession, payload: StudentCreate, faculty_college: str) -> Student:
+    faculty_college = (faculty_college or "").strip()
+    if not faculty_college:
+        raise ValueError("Faculty college is missing. Please set faculty.college.")
 
-    # duplicate by email (only if provided)
+    # ✅ duplicate by USN within same college
+    existing = await db.execute(
+        select(Student).where(Student.usn == payload.usn, Student.college == faculty_college)
+    )
+    if existing.scalar_one_or_none():
+        raise ValueError(f"Duplicate USN in this college: {payload.usn}")
+
+    # ✅ duplicate by email within same college (only if provided)
     if payload.email:
-        e2 = await db.execute(select(Student).where(Student.email == str(payload.email)))
+        e2 = await db.execute(
+            select(Student).where(Student.email == str(payload.email), Student.college == faculty_college)
+        )
         if e2.scalar_one_or_none():
-            raise ValueError(f"Duplicate Email: {payload.email}")
+            raise ValueError(f"Duplicate Email in this college: {payload.email}")
 
     s = Student(
+        college=faculty_college,  # ✅ enforce from faculty, not from client
         name=payload.name.strip(),
         usn=payload.usn.strip(),
         branch=payload.branch.strip(),
@@ -62,6 +71,8 @@ async def create_students_from_csv(
     db: AsyncSession,
     csv_bytes: bytes,
     skip_duplicates: bool = True,
+    *,
+    faculty_college: str,
 ) -> Tuple[int, int, int, int, List[str]]:
     """
     CSV headers expected (required):
@@ -69,6 +80,10 @@ async def create_students_from_csv(
     Optional:
       email, student_type
     """
+    faculty_college = (faculty_college or "").strip()
+    if not faculty_college:
+        return (0, 0, 0, 0, ["Faculty college is missing. Please set faculty.college."])
+
     errors: List[str] = []
     inserted = 0
     skipped = 0
@@ -107,24 +122,29 @@ async def create_students_from_csv(
             if not name or not usn or not branch:
                 raise ValueError("name/usn/branch cannot be empty")
 
-            # dup USN
-            res = await db.execute(select(Student).where(Student.usn == usn))
+            # ✅ dup USN within same college
+            res = await db.execute(
+                select(Student).where(Student.usn == usn, Student.college == faculty_college)
+            )
             if res.scalar_one_or_none():
                 if skip_duplicates:
                     skipped += 1
                     continue
-                raise ValueError(f"Duplicate USN: {usn}")
+                raise ValueError(f"Duplicate USN in this college: {usn}")
 
-            # dup Email
+            # ✅ dup Email within same college
             if email:
-                res2 = await db.execute(select(Student).where(Student.email == email))
+                res2 = await db.execute(
+                    select(Student).where(Student.email == email, Student.college == faculty_college)
+                )
                 if res2.scalar_one_or_none():
                     if skip_duplicates:
                         skipped += 1
                         continue
-                    raise ValueError(f"Duplicate Email: {email}")
+                    raise ValueError(f"Duplicate Email in this college: {email}")
 
             s = Student(
+                college=faculty_college,  # ✅ enforce from faculty
                 name=name,
                 usn=usn,
                 branch=branch,
