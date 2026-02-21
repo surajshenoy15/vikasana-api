@@ -216,10 +216,14 @@ async def send_activation_otp(
         raise HTTPException(status_code=404, detail="Faculty not found")
 
     otp = generate_otp()
+
+    print("\n========= FACULTY OTP =========")
+    print(f"EMAIL: {faculty.email}")
+    print(f"OTP  : {otp}")
+    print("================================\n")
+
     sess.otp_hash = hash_otp(otp)
     sess.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    sess.otp_attempts = 0
-    sess.otp_verified_at = None
 
     await db.commit()
 
