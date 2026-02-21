@@ -7,40 +7,30 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.core.security import decode_access_token
 from app.models.admin import Admin
+from app.models.faculty import Faculty  # ✅ NEW
 
 bearer = HTTPBearer(auto_error=False)
+
+
+def _not_authenticated_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def get_current_admin(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: AsyncSession = Depends(get_db),
 ) -> Admin:
-    """
-    Reusable auth guard dependency.
-
-    Usage in any protected route:
-        @router.get("/something")
-        async def protected_route(admin: Admin = Depends(get_current_admin)):
-            return {"hello": admin.name}
-
-    What it does:
-    1. Reads the Bearer token from Authorization header
-    2. Verifies JWT signature and expiry
-    3. Loads admin from DB
-    4. Checks admin is still active
-    5. Returns admin object — or raises 401/403
-    """
-    not_authenticated = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or missing token",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    not_authenticated = _not_authenticated_exception()
 
     if not credentials:
         raise not_authenticated
 
     try:
-        payload  = decode_access_token(credentials.credentials)
+        payload = decode_access_token(credentials.credentials)
         admin_id = int(payload["sub"])
         if payload.get("type") != "access":
             raise not_authenticated
@@ -48,7 +38,7 @@ async def get_current_admin(
         raise not_authenticated
 
     result = await db.execute(select(Admin).where(Admin.id == admin_id))
-    admin  = result.scalar_one_or_none()
+    admin = result.scalar_one_or_none()
 
     if admin is None:
         raise not_authenticated
@@ -60,3 +50,65 @@ async def get_current_admin(
         )
 
     return admin
+
+
+async def get_current_faculty(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: AsyncSession = Depends(get_db),
+) -> Faculty:
+    """
+    Faculty auth guard dependency.
+
+    Usage:
+        @router.post("/faculty/students")
+        async def add_students(
+            faculty: Faculty = Depends(get_current_faculty),
+            db: AsyncSession = Depends(get_db),
+        ):
+            ...
+
+    What it does:
+    1. Reads Bearer token
+    2. Verifies JWT + expiry
+    3. Loads faculty from DB
+    4. Checks faculty is active (if field exists)
+    """
+    not_authenticated = _not_authenticated_exception()
+
+    if not credentials:
+        raise not_authenticated
+
+    try:
+        payload = decode_access_token(credentials.credentials)
+        faculty_id = int(payload["sub"])
+
+        # ✅ ensure it is an access token (same as admin)
+        if payload.get("type") != "access":
+            raise not_authenticated
+
+        # ✅ OPTIONAL: if you encode role in token, enforce it
+        # (won't break if role is absent)
+        role = payload.get("role")
+        if role and role != "faculty":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized as faculty",
+            )
+
+    except (JWTError, KeyError, ValueError):
+        raise not_authenticated
+
+    result = await db.execute(select(Faculty).where(Faculty.id == faculty_id))
+    faculty = result.scalar_one_or_none()
+
+    if faculty is None:
+        raise not_authenticated
+
+    # ✅ Only check is_active if your Faculty model has it
+    if hasattr(faculty, "is_active") and not faculty.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This faculty account has been deactivated",
+        )
+
+    return faculty

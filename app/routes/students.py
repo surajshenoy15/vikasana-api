@@ -1,34 +1,23 @@
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_db
+from app.core.dependencies import get_current_faculty
+from app.models.faculty import Faculty
+
 from app.schemas.student import StudentCreate, StudentOut, BulkUploadResult
 from app.controllers.student_controller import create_student, create_students_from_csv
 
-# ✅ your real DB dependency
-from app.core.database import get_db
-
-# ✅ your auth dependency
-from app.routes.auth import get_current_user
-from app.models.faculty import Faculty
-
 
 router = APIRouter(prefix="/faculty/students", tags=["Faculty - Students"])
-
-
-def _ensure_faculty(user):
-    # If your get_current_user returns Faculty instance, this works.
-    # If it returns dict/JWT payload, tell me and I’ll adjust.
-    if not isinstance(user, Faculty):
-        raise HTTPException(status_code=403, detail="Only faculty can manage students")
 
 
 @router.post("", response_model=StudentOut)
 async def add_student_manual(
     payload: StudentCreate,
     db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
+    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
-    _ensure_faculty(user)
     try:
         return await create_student(db, payload)
     except ValueError as e:
@@ -40,14 +29,13 @@ async def add_students_bulk(
     file: UploadFile = File(...),
     skip_duplicates: bool = Query(True, description="If true, existing USNs will be skipped"),
     db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
+    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
-    _ensure_faculty(user)
-
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv file is allowed")
 
     data = await file.read()
+
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
         db=db,
         csv_bytes=data,
