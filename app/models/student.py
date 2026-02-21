@@ -1,14 +1,12 @@
 from sqlalchemy import String, Integer, DateTime, func, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models import Base  # make sure Base is exported in app/models/__init__.py
+from app.core.database import Base  # ✅ correct (prevents circular import)
 
 
 class Student(Base):
     __tablename__ = "students"
-    __table_args__ = (
-        UniqueConstraint("usn", name="uq_students_usn"),
-    )
+    __table_args__ = (UniqueConstraint("usn", name="uq_students_usn"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
@@ -19,4 +17,8 @@ class Student(Base):
     passout_year: Mapped[int] = mapped_column(Integer, nullable=False)
     admitted_year: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
