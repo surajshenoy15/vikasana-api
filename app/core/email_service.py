@@ -26,8 +26,44 @@ async def _send(api_key: str, payload: dict) -> None:
         raise RuntimeError(f"Brevo error {r.status_code}: {r.text}")
 
 
-def _wrap(body_html: str) -> str:
-    """Wrap content in a shared branded shell with dark outer bg and footer."""
+# ─── Design tokens ────────────────────────────────────────────
+#  Navy  : #0B1F4B   (primary brand, headers, buttons)
+#  Gold  : #C9952A   (accent line, highlights)
+#  Slate : #475569   (body text)
+#  Light : #F7F9FC   (page background)
+#  White : #FFFFFF   (card background)
+# ─────────────────────────────────────────────────────────────
+
+_VIKASANA_LOGO = """
+<table cellpadding="0" cellspacing="0" style="margin:0 auto;">
+  <tr>
+    <td style="padding-right:10px;vertical-align:middle;">
+      <!-- Shield mark -->
+      <svg width="40" height="40" viewBox="0 0 40 40" fill="none"
+           xmlns="http://www.w3.org/2000/svg">
+        <rect width="40" height="40" rx="10" fill="#0B1F4B"/>
+        <path d="M20 7L32 12V21C32 27.6 26.5 33.4 20 35C13.5 33.4 8 27.6 8 21V12Z"
+              fill="none" stroke="#C9952A" stroke-width="1.8" stroke-linejoin="round"/>
+        <path d="M14 21L18.5 26.5L26 15"
+              stroke="#ffffff" stroke-width="2.2"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </td>
+    <td style="vertical-align:middle;">
+      <div style="font-size:17px;font-weight:700;color:#0B1F4B;
+                  letter-spacing:-.2px;line-height:1.1;">Vikasana</div>
+      <div style="font-size:10px;font-weight:500;color:#C9952A;
+                  letter-spacing:2px;text-transform:uppercase;">Foundation</div>
+    </td>
+  </tr>
+</table>
+"""
+
+def _wrap(body_html: str, from_email: str = "admin@vikasana.org") -> str:
+    """
+    Prestigious light-theme shell.
+    Layout: light grey page → white card → navy header band → gold rule → content → footer.
+    """
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -35,36 +71,60 @@ def _wrap(body_html: str) -> str:
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Vikasana Foundation</title>
 </head>
-<body style="margin:0;padding:0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;
-             background:#0f172a;">
+<body style="margin:0;padding:0;background:#EEF2F7;
+             font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
 
+  <!-- Page wrapper -->
   <table width="100%" cellpadding="0" cellspacing="0"
-         style="background:#0f172a;padding:40px 16px;">
+         style="background:#EEF2F7;padding:48px 16px;">
     <tr>
       <td align="center">
 
         <!-- Card -->
-        <table width="580" cellpadding="0" cellspacing="0"
-               style="max-width:580px;width:100%;background:#ffffff;
-                      border-radius:24px;overflow:hidden;
-                      box-shadow:0 25px 60px rgba(0,0,0,0.45);">
+        <table width="600" cellpadding="0" cellspacing="0"
+               style="max-width:600px;width:100%;background:#ffffff;
+                      border-radius:4px;overflow:hidden;
+                      border:1px solid #D9E2EE;
+                      box-shadow:0 2px 16px rgba(11,31,75,0.08);">
 
-          <!-- Rainbow top bar -->
+          <!-- Navy header band -->
           <tr>
-            <td style="height:6px;background:linear-gradient(90deg,#6366f1,#8b5cf6,#ec4899);
-                       font-size:0;line-height:0;">&nbsp;</td>
+            <td style="background:#0B1F4B;padding:28px 40px;">
+              {_VIKASANA_LOGO}
+            </td>
+          </tr>
+
+          <!-- Gold accent rule -->
+          <tr>
+            <td style="height:3px;background:#C9952A;font-size:0;line-height:0;">&nbsp;</td>
           </tr>
 
           {body_html}
 
+          <!-- Divider -->
+          <tr>
+            <td style="height:1px;background:#E2E8F0;font-size:0;line-height:0;">&nbsp;</td>
+          </tr>
+
           <!-- Footer -->
           <tr>
-            <td style="background:#f8fafc;border-top:1px solid #e2e8f0;
-                       padding:20px 32px;text-align:center;">
-              <p style="margin:0;font-size:11px;color:#94a3b8;line-height:1.7;">
-                © 2026 Vikasana Foundation · Social Activity Tracking Platform<br/>
-                You received this email because you were added to our platform.
-              </p>
+            <td style="background:#F7F9FC;padding:24px 40px;">
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="text-align:center;">
+                    <p style="margin:0 0 6px;font-size:11px;color:#94A3B8;line-height:1.7;">
+                      © 2026 <strong style="color:#64748b;">Vikasana Foundation</strong>
+                      &nbsp;·&nbsp; Social Activity Tracking Platform
+                    </p>
+                    <p style="margin:0;font-size:11px;color:#B0BEC5;line-height:1.6;">
+                      You received this because an administrator added you to our platform.
+                      &nbsp;·&nbsp;
+                      <a href="mailto:{from_email}"
+                         style="color:#94A3B8;text-decoration:underline;">Contact Support</a>
+                    </p>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
 
@@ -80,22 +140,29 @@ def _wrap(body_html: str) -> str:
 
 
 def _store_buttons(play_url: str, apple_url: str) -> str:
-    """Render Play Store + App Store CTA buttons (inline SVG, no external images)."""
+    """
+    Light-theme Play Store + App Store buttons.
+    Dark pill on white background — clean and professional.
+    """
     return f"""
     <tr>
-      <td align="center" style="padding:28px 0 0;">
+      <td align="center" style="padding:24px 0 8px;">
+        <p style="margin:0 0 16px;font-size:11px;font-weight:600;color:#94A3B8;
+                  text-transform:uppercase;letter-spacing:1.2px;">
+          Download the App
+        </p>
         <table cellpadding="0" cellspacing="0">
           <tr>
             <!-- Google Play -->
-            <td style="padding-right:10px;">
+            <td style="padding-right:8px;">
               <a href="{play_url}" target="_blank"
-                 style="display:inline-block;background:#1a1a2e;color:#fff;
-                        text-decoration:none;border-radius:12px;padding:0;
-                        border:1px solid #334155;overflow:hidden;">
+                 style="display:inline-block;background:#0B1F4B;color:#fff;
+                        text-decoration:none;border-radius:6px;
+                        border:1px solid #0B1F4B;overflow:hidden;">
                 <table cellpadding="0" cellspacing="0">
                   <tr>
-                    <td style="padding:11px 16px;vertical-align:middle;">
-                      <svg width="22" height="22" viewBox="0 0 512 512"
+                    <td style="padding:10px 14px;vertical-align:middle;">
+                      <svg width="20" height="20" viewBox="0 0 512 512"
                            xmlns="http://www.w3.org/2000/svg">
                         <path d="M40 28L280 256 40 484V28Z" fill="#00C853"/>
                         <path d="M40 28L280 256 40 484C24 475 14 458 14 440V72C14 54 24 37 40 28Z"
@@ -106,9 +173,10 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
                               fill="#2196F3"/>
                       </svg>
                     </td>
-                    <td style="padding:11px 16px 11px 0;vertical-align:middle;">
-                      <div style="font-size:9px;color:#94a3b8;font-weight:400;
-                                  letter-spacing:.5px;line-height:1.2;">GET IT ON</div>
+                    <td style="padding:10px 14px 10px 0;vertical-align:middle;">
+                      <div style="font-size:8px;color:#94A3B8;font-weight:500;
+                                  letter-spacing:.8px;line-height:1.2;
+                                  text-transform:uppercase;">Get it on</div>
                       <div style="font-size:13px;color:#fff;font-weight:700;
                                   line-height:1.3;white-space:nowrap;">Google Play</div>
                     </td>
@@ -118,15 +186,15 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
             </td>
 
             <!-- App Store -->
-            <td style="padding-left:10px;">
+            <td style="padding-left:8px;">
               <a href="{apple_url}" target="_blank"
-                 style="display:inline-block;background:#1a1a2e;color:#fff;
-                        text-decoration:none;border-radius:12px;padding:0;
-                        border:1px solid #334155;overflow:hidden;">
+                 style="display:inline-block;background:#0B1F4B;color:#fff;
+                        text-decoration:none;border-radius:6px;
+                        border:1px solid #0B1F4B;overflow:hidden;">
                 <table cellpadding="0" cellspacing="0">
                   <tr>
-                    <td style="padding:11px 16px;vertical-align:middle;">
-                      <svg width="22" height="22" viewBox="0 0 814 1000" fill="white"
+                    <td style="padding:10px 14px;vertical-align:middle;">
+                      <svg width="20" height="20" viewBox="0 0 814 1000" fill="white"
                            xmlns="http://www.w3.org/2000/svg">
                         <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5
                                  0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9
@@ -141,9 +209,10 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
                                  45.4 0 102.5-30.4 135.5-71.3z"/>
                       </svg>
                     </td>
-                    <td style="padding:11px 16px 11px 0;vertical-align:middle;">
-                      <div style="font-size:9px;color:#94a3b8;font-weight:400;
-                                  letter-spacing:.5px;line-height:1.2;">DOWNLOAD ON THE</div>
+                    <td style="padding:10px 14px 10px 0;vertical-align:middle;">
+                      <div style="font-size:8px;color:#94A3B8;font-weight:500;
+                                  letter-spacing:.8px;line-height:1.2;
+                                  text-transform:uppercase;">Download on the</div>
                       <div style="font-size:13px;color:#fff;font-weight:700;
                                   line-height:1.3;white-space:nowrap;">App Store</div>
                     </td>
@@ -159,13 +228,13 @@ def _store_buttons(play_url: str, apple_url: str) -> str:
 
 
 def _otp_digits(otp: str) -> str:
-    """Render each OTP digit in its own styled box."""
+    """Render each OTP digit in a clean bordered box — no dark backgrounds."""
     boxes = "".join([
-        f"""<td style="padding:0 4px;">
-              <div style="width:44px;height:52px;line-height:52px;text-align:center;
-                          font-size:26px;font-weight:800;background:#f1f5f9;
-                          border-radius:10px;border:2px solid #e2e8f0;
-                          color:#1e1b4b;">{d}</div>
+        f"""<td style="padding:0 5px;">
+              <div style="width:46px;height:56px;line-height:56px;text-align:center;
+                          font-size:28px;font-weight:700;background:#F7F9FC;
+                          border-radius:6px;border:1.5px solid #CBD5E1;
+                          color:#0B1F4B;font-family:'Courier New',monospace;">{d}</div>
             </td>"""
         for d in otp
     ])
@@ -182,122 +251,109 @@ def _otp_digits(otp: str) -> str:
 
 async def send_activation_email(to_email: str, to_name: str, activate_url: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "You're invited — Activate your Faculty Account"
+    subject = "Invitation — Activate Your Faculty Account | Vikasana Foundation"
 
     body = f"""
-          <!-- Hero -->
+          <!-- Greeting section -->
           <tr>
-            <td style="background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 60%,#312e81 100%);
-                       padding:48px 40px 40px;text-align:center;">
-
-              <!-- Logo -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td align="center" style="padding-bottom:22px;">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="padding-right:12px;vertical-align:middle;">
-                          <svg width="44" height="44" viewBox="0 0 42 42" fill="none"
-                               xmlns="http://www.w3.org/2000/svg">
-                            <rect width="42" height="42" rx="12"
-                                  fill="white" fill-opacity="0.15"/>
-                            <path d="M21 8L34 13L34 22C34 29 27.5 35 21 37C14.5 35 8 29 8 22L8 13Z"
-                                  fill="none" stroke="white" stroke-width="2"
-                                  stroke-linejoin="round"/>
-                            <path d="M15 21L19.5 27L27 16"
-                                  stroke="#fbbf24" stroke-width="2.5"
-                                  stroke-linecap="round" stroke-linejoin="round"/>
-                          </svg>
-                        </td>
-                        <td style="vertical-align:middle;text-align:left;">
-                          <div style="color:#fff;font-size:18px;font-weight:700;
-                                      letter-spacing:.3px;line-height:1.1;">Vikasana</div>
-                          <div style="color:rgba(255,255,255,.6);font-size:11px;
-                                      letter-spacing:1.5px;text-transform:uppercase;">Foundation</div>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-
-              <h1 style="margin:0;color:#fff;font-size:26px;font-weight:800;
+            <td style="padding:40px 40px 0;">
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+                        text-transform:uppercase;letter-spacing:1.5px;">
+                Faculty Invitation
+              </p>
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
                          line-height:1.3;letter-spacing:-.3px;">
-                Welcome to the team,<br/>{to_name}!
+                Welcome, {to_name}
               </h1>
-              <p style="margin:12px 0 0;color:rgba(255,255,255,.75);font-size:15px;
-                        line-height:1.5;">
-                Your faculty account is ready — one click to get started.
+            </td>
+          </tr>
+
+          <!-- Thin gold rule under heading -->
+          <tr>
+            <td style="padding:16px 40px 0;">
+              <div style="width:40px;height:2px;background:#C9952A;"></div>
+            </td>
+          </tr>
+
+          <!-- Body text -->
+          <tr>
+            <td style="padding:24px 40px 0;">
+              <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
+                You have been invited to join the
+                <strong style="color:#0B1F4B;">Vikasana Foundation</strong>
+                Social Activity Tracking platform as a Faculty Member.
+                Please activate your account using the button below.
               </p>
             </td>
           </tr>
 
-          <!-- Body -->
+          <!-- Account details box -->
           <tr>
-            <td style="padding:36px 40px 32px;">
-
-              <!-- Account details card -->
+            <td style="padding:24px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#f8faff;border:1px solid #e3eaf7;
-                            border-radius:14px;margin-bottom:28px;">
+                     style="border:1px solid #D9E2EE;border-radius:4px;
+                            border-left:3px solid #0B1F4B;">
                 <tr>
-                  <td style="padding:20px 24px;">
-                    <p style="margin:0 0 4px;color:#64748b;font-size:11px;
-                               text-transform:uppercase;letter-spacing:1px;font-weight:600;">
-                      Account Details
-                    </p>
-                    <p style="margin:0;color:#0f172a;font-size:15px;font-weight:700;">
+                  <td style="padding:16px 20px;">
+                    <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#94A3B8;
+                               text-transform:uppercase;letter-spacing:1.2px;">Account Details</p>
+                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0B1F4B;">
                       {to_email}
                     </p>
-                    <p style="margin:6px 0 0;color:#64748b;font-size:13px;">
-                      Role: <strong style="color:#6366f1;">Faculty Member</strong>
+                    <p style="margin:4px 0 0;font-size:13px;color:#64748B;">
+                      Role:&nbsp;<span style="color:#C9952A;font-weight:600;">Faculty Member</span>
                     </p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <p style="margin:0 0 28px;color:#334155;font-size:15px;line-height:1.75;">
-                You've been invited to join the <strong>Vikasana Foundation</strong> Social
-                Activity Tracking platform. Click the button below to activate your account
-                and set your password.
-              </p>
-
-              <!-- CTA -->
-              <table width="100%" cellpadding="0" cellspacing="0">
+          <!-- CTA Button -->
+          <tr>
+            <td style="padding:32px 40px 0;">
+              <table cellpadding="0" cellspacing="0">
                 <tr>
-                  <td align="center" style="padding-bottom:28px;">
+                  <td style="background:#0B1F4B;border-radius:4px;">
                     <a href="{activate_url}"
-                       style="display:inline-block;
-                              background:linear-gradient(135deg,#6366f1,#8b5cf6);
-                              color:#ffffff;text-decoration:none;font-size:15px;
-                              font-weight:700;letter-spacing:.3px;padding:16px 44px;
-                              border-radius:14px;
-                              box-shadow:0 6px 20px rgba(99,102,241,0.4);">
-                      ✦ &nbsp; Activate My Account &nbsp; ✦
+                       style="display:inline-block;padding:14px 36px;
+                              color:#ffffff;text-decoration:none;
+                              font-size:14px;font-weight:600;
+                              letter-spacing:.4px;">
+                      Activate My Account &rarr;
                     </a>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <!-- Expiry note -->
+          <!-- Expiry notice -->
+          <tr>
+            <td style="padding:20px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#fffbeb;border:1px solid #fde68a;
-                            border-radius:12px;margin-bottom:24px;">
+                     style="background:#FFFBEB;border:1px solid #FDE68A;border-radius:4px;">
                 <tr>
-                  <td style="padding:14px 18px;">
-                    <p style="margin:0;color:#92400e;font-size:13px;line-height:1.6;">
-                      ⏱ &nbsp;<strong>This link expires in 48 hours.</strong>
-                      If it expires, contact your admin for a new invite.
+                  <td style="padding:12px 16px;">
+                    <p style="margin:0;font-size:13px;color:#92400E;line-height:1.6;">
+                      <strong>Note:</strong> This activation link expires in
+                      <strong>48 hours</strong>. If it has expired, please contact
+                      your administrator for a new invitation.
                     </p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <!-- Fallback URL -->
-              <p style="margin:0;color:#94a3b8;font-size:12px;line-height:1.6;">
-                Button not working? Paste this link into your browser:<br/>
+          <!-- Fallback URL -->
+          <tr>
+            <td style="padding:20px 40px 36px;">
+              <p style="margin:0;font-size:12px;color:#94A3B8;line-height:1.7;">
+                If the button above does not work, copy and paste the link below
+                into your browser:<br/>
                 <a href="{activate_url}"
-                   style="color:#6366f1;word-break:break-all;font-size:11px;">
+                   style="color:#0B1F4B;font-size:11px;word-break:break-all;">
                   {activate_url}
                 </a>
               </p>
@@ -309,73 +365,94 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
         "sender":      {"name": from_name, "email": from_email},
         "to":          [{"email": to_email, "name": to_name}],
         "subject":     subject,
-        "htmlContent": _wrap(body),
+        "htmlContent": _wrap(body, from_email),
     }
     await _send(api_key, payload)
 
 
 # ══════════════════════════════════════════════════════════════
-#  2. Faculty — OTP Email  (used after activation link click)
+#  2. Faculty — OTP Email
 # ══════════════════════════════════════════════════════════════
 
 async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Your OTP Code — Vikasana Faculty Activation"
+    subject = "Your Verification Code — Vikasana Foundation"
 
     body = f"""
-          <!-- Hero -->
+          <!-- Greeting -->
           <tr>
-            <td style="background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 60%,#312e81 100%);
-                       padding:48px 40px 40px;text-align:center;">
-              <div style="font-size:40px;line-height:1;margin-bottom:14px;">🔐</div>
-              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:800;">
-                Faculty Verification Code
+            <td style="padding:40px 40px 0;">
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+                        text-transform:uppercase;letter-spacing:1.5px;">
+                Account Activation
+              </p>
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+                         line-height:1.3;">
+                Verification Code
               </h1>
-              <p style="margin:10px 0 0;color:rgba(255,255,255,.7);font-size:14px;">
-                Vikasana Foundation · Account Activation
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 40px 0;">
+              <div style="width:40px;height:2px;background:#C9952A;"></div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:24px 40px 0;">
+              <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
+                Hello <strong style="color:#0B1F4B;">{to_name}</strong>,
+                please use the verification code below to complete your
+                faculty account activation.
               </p>
             </td>
           </tr>
 
-          <!-- Body -->
+          <!-- OTP box -->
           <tr>
-            <td style="padding:36px 40px;text-align:center;">
-              <p style="margin:0 0 6px;color:#475569;font-size:15px;">
-                Hello, <strong>{to_name}</strong>!
+            <td style="padding:32px 40px 0;text-align:center;">
+              <p style="margin:0 0 16px;font-size:11px;font-weight:600;color:#94A3B8;
+                        text-transform:uppercase;letter-spacing:1.2px;">
+                One-Time Passcode
               </p>
-              <p style="margin:0 0 32px;color:#64748b;font-size:14px;line-height:1.7;">
-                Use the one-time code below to continue activating your faculty account.
-              </p>
-
               {_otp_digits(otp)}
+            </td>
+          </tr>
 
-              <!-- Expiry badge -->
-              <table cellpadding="0" cellspacing="0" style="margin:26px auto;">
+          <!-- Expiry badge -->
+          <tr>
+            <td style="padding:20px 40px 0;text-align:center;">
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
                 <tr>
-                  <td style="background:#fef3c7;border-radius:100px;padding:9px 20px;">
-                    <p style="margin:0;font-size:13px;color:#92400e;font-weight:600;">
-                      ⏱ &nbsp;Expires in <strong>10 minutes</strong>
+                  <td style="background:#FEF3C7;border:1px solid #FDE68A;
+                             border-radius:100px;padding:8px 20px;">
+                    <p style="margin:0;font-size:12px;color:#92400E;font-weight:600;">
+                      &#x23F1;&nbsp; This code expires in <strong>10 minutes</strong>
                     </p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <!-- Security note -->
+          <!-- Security note -->
+          <tr>
+            <td style="padding:24px 40px 36px;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;">
+                     style="background:#F7F9FC;border:1px solid #E2E8F0;
+                            border-radius:4px;border-left:3px solid #94A3B8;">
                 <tr>
-                  <td style="padding:18px 20px;text-align:left;">
-                    <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
-                      🛡️ <strong>Security tip:</strong> Vikasana will never ask you to share
-                      this code. If you didn't request this, safely ignore this email —
-                      your account is safe.
+                  <td style="padding:14px 18px;">
+                    <p style="margin:0;font-size:13px;color:#64748B;line-height:1.65;">
+                      <strong>Security reminder:</strong> Vikasana Foundation will never
+                      ask you to share this code with anyone. If you did not request this,
+                      please disregard this email — your account remains secure.
                     </p>
                   </td>
                 </tr>
               </table>
-
-              <p style="margin:22px 0 0;font-size:12px;color:#94a3b8;">
-                Activating account for <strong>{to_email}</strong>
+              <p style="margin:16px 0 0;font-size:12px;color:#94A3B8;">
+                Verifying account: <strong>{to_email}</strong>
               </p>
             </td>
           </tr>
@@ -385,7 +462,7 @@ async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
         "sender":      {"name": from_name, "email": from_email},
         "to":          [{"email": to_email, "name": to_name}],
         "subject":     subject,
-        "htmlContent": _wrap(body),
+        "htmlContent": _wrap(body, from_email),
     }
     await _send(api_key, payload)
 
@@ -403,23 +480,26 @@ async def send_student_welcome_email(
     app_store_url: str  = "https://apps.apple.com/app/vikasana/id000000000",
 ) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Welcome to Vikasana Foundation 🎉"
+    subject = "Welcome to Vikasana Foundation — Get Started Today"
 
     steps = [
-        ("1", "Download the app from <strong>Play Store</strong> or <strong>App Store</strong> below."),
-        ("2", f"Open the app and enter your email: <strong>{to_email}</strong>"),
-        ("3", "Receive an OTP in this inbox and log in instantly — no password needed!"),
+        ("01", "Download the Vikasana app from the <strong>Play Store</strong> or <strong>App Store</strong>."),
+        ("02", f"Open the app and enter your registered email: <strong>{to_email}</strong>"),
+        ("03", "Enter the OTP sent to your inbox — no password needed."),
     ]
     steps_html = "".join([
-        f"""<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;">
+        f"""<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
               <tr>
-                <td width="32" style="vertical-align:top;padding-top:2px;">
-                  <div style="width:28px;height:28px;line-height:28px;text-align:center;
-                              border-radius:50%;font-size:13px;font-weight:700;color:#fff;
-                              background:linear-gradient(135deg,#6366f1,#8b5cf6);">{n}</div>
+                <td width="36" style="vertical-align:top;padding-top:1px;">
+                  <div style="width:32px;height:32px;line-height:32px;text-align:center;
+                              border-radius:4px;font-size:11px;font-weight:700;
+                              color:#ffffff;background:#0B1F4B;
+                              font-family:'Courier New',monospace;">{n}</div>
                 </td>
-                <td style="padding-left:12px;vertical-align:top;">
-                  <p style="margin:0;color:#334155;font-size:14px;line-height:1.65;">{t}</p>
+                <td style="padding-left:14px;vertical-align:top;
+                           border-bottom:1px solid #EEF2F7;padding-bottom:16px;">
+                  <p style="margin:0;color:#475569;font-size:14px;line-height:1.65;
+                            padding-top:6px;">{t}</p>
                 </td>
               </tr>
             </table>"""
@@ -427,74 +507,101 @@ async def send_student_welcome_email(
     ])
 
     body = f"""
-          <!-- Hero -->
+          <!-- Greeting -->
           <tr>
-            <td style="background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 60%,#312e81 100%);
-                       padding:48px 40px 40px;text-align:center;">
-              <div style="width:64px;height:64px;line-height:64px;text-align:center;
-                          font-size:30px;border-radius:18px;margin:0 auto 18px;
-                          background:linear-gradient(135deg,#6366f1,#8b5cf6);">🎓</div>
-              <h1 style="margin:0;color:#fff;font-size:26px;font-weight:800;
-                         line-height:1.3;letter-spacing:-.3px;">
-                Welcome aboard, {to_name}!
+            <td style="padding:40px 40px 0;">
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+                        text-transform:uppercase;letter-spacing:1.5px;">
+                Student Enrollment
+              </p>
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+                         line-height:1.3;letter-spacing:-.2px;">
+                Welcome, {to_name}
               </h1>
-              <p style="margin:10px 0 0;color:rgba(255,255,255,.75);font-size:14px;">
-                Vikasana Foundation Student Platform
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 40px 0;">
+              <div style="width:40px;height:2px;background:#C9952A;"></div>
+            </td>
+          </tr>
+
+          <!-- Intro -->
+          <tr>
+            <td style="padding:24px 40px 0;">
+              <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
+                Your faculty has enrolled you in the
+                <strong style="color:#0B1F4B;">Vikasana Foundation</strong>
+                learning platform. Download the app to begin — login is
+                seamless and passwordless via one-time passcode.
               </p>
             </td>
           </tr>
 
-          <!-- Body -->
+          <!-- Registered email card -->
           <tr>
-            <td style="padding:36px 40px 32px;">
-
-              <!-- Email highlight card -->
+            <td style="padding:24px 40px 0;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#ede9fe;border-radius:12px;margin-bottom:28px;">
+                     style="border:1px solid #D9E2EE;border-radius:4px;
+                            border-left:3px solid #C9952A;">
                 <tr>
-                  <td style="padding:14px 18px;">
-                    <table cellpadding="0" cellspacing="0">
-                      <tr>
-                        <td style="font-size:20px;padding-right:12px;vertical-align:middle;">📧</td>
-                        <td style="vertical-align:middle;">
-                          <p style="margin:0;font-size:11px;color:#7c3aed;font-weight:700;
-                                     text-transform:uppercase;letter-spacing:.5px;">Your login email</p>
-                          <p style="margin:2px 0 0;font-size:14px;color:#1e1b4b;font-weight:700;">
-                            {to_email}
-                          </p>
-                        </td>
-                      </tr>
-                    </table>
+                  <td style="padding:14px 20px;">
+                    <p style="margin:0 0 2px;font-size:10px;font-weight:700;color:#94A3B8;
+                               text-transform:uppercase;letter-spacing:1.2px;">
+                      Your Registered Email
+                    </p>
+                    <p style="margin:4px 0 0;font-size:15px;font-weight:600;color:#0B1F4B;">
+                      {to_email}
+                    </p>
+                    <p style="margin:4px 0 0;font-size:12px;color:#64748B;">
+                      Use this email to log in to the app
+                    </p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <p style="margin:0 0 22px;color:#334155;font-size:15px;line-height:1.75;">
-                Your faculty has added you to the <strong>Vikasana Foundation</strong> learning
-                platform. Download the app and log in using OTP — no password required!
+          <!-- Steps heading -->
+          <tr>
+            <td style="padding:28px 40px 4px;">
+              <p style="margin:0;font-size:11px;font-weight:700;color:#94A3B8;
+                        text-transform:uppercase;letter-spacing:1.2px;">
+                Getting Started
               </p>
+            </td>
+          </tr>
 
-              <p style="margin:0 0 16px;font-size:12px;font-weight:700;color:#64748b;
-                        text-transform:uppercase;letter-spacing:.7px;">How to get started</p>
-
+          <!-- Steps -->
+          <tr>
+            <td style="padding:12px 40px 0;">
               {steps_html}
+            </td>
+          </tr>
 
-              <!-- Store buttons -->
-              <table width="100%" cellpadding="0" cellspacing="0">
-                {_store_buttons(play_store_url, app_store_url)}
-              </table>
+          <!-- Store buttons -->
+          <table width="100%" cellpadding="0" cellspacing="0">
+            {_store_buttons(play_store_url, app_store_url)}
+          </table>
 
-              <!-- Fallback URL -->
-              <p style="text-align:center;margin:16px 0 0;font-size:12px;color:#94a3b8;">
-                Or visit:&nbsp;
+          <!-- Fallback URL -->
+          <tr>
+            <td style="padding:12px 40px 0;text-align:center;">
+              <p style="margin:0;font-size:12px;color:#94A3B8;">
+                Or download directly:&nbsp;
                 <a href="{app_download_url}"
-                   style="color:#6366f1;font-weight:600;text-decoration:none;">
+                   style="color:#0B1F4B;font-weight:600;text-decoration:underline;">
                   {app_download_url}
                 </a>
               </p>
+            </td>
+          </tr>
 
-              <p style="margin:28px 0 0;font-size:12px;color:#cbd5e1;text-align:center;">
-                Didn't expect this email? You can safely ignore it.
+          <!-- Ignore notice -->
+          <tr>
+            <td style="padding:24px 40px 36px;text-align:center;">
+              <p style="margin:0;font-size:12px;color:#B0BEC5;line-height:1.6;">
+                If you were not expecting this invitation, you may safely disregard this email.
               </p>
             </td>
           </tr>
@@ -504,7 +611,7 @@ async def send_student_welcome_email(
         "sender":      {"name": from_name, "email": from_email},
         "to":          [{"email": to_email, "name": to_name}],
         "subject":     subject,
-        "htmlContent": _wrap(body),
+        "htmlContent": _wrap(body, from_email),
     }
     await _send(api_key, payload)
 
@@ -515,61 +622,81 @@ async def send_student_welcome_email(
 
 async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
     api_key, from_email, from_name = _brevo_cfg()
-    subject = "Your Login OTP — Vikasana Foundation"
+    subject = "Your Login Code — Vikasana Foundation"
 
     body = f"""
-          <!-- Hero -->
+          <!-- Greeting -->
           <tr>
-            <td style="background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 60%,#312e81 100%);
-                       padding:48px 40px 40px;text-align:center;">
-              <div style="font-size:40px;line-height:1;margin-bottom:14px;">🔐</div>
-              <h1 style="margin:0;color:#fff;font-size:24px;font-weight:800;">
-                Verification Code
+            <td style="padding:40px 40px 0;">
+              <p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#C9952A;
+                        text-transform:uppercase;letter-spacing:1.5px;">
+                Student Login
+              </p>
+              <h1 style="margin:8px 0 0;font-size:24px;font-weight:700;color:#0B1F4B;
+                         line-height:1.3;">
+                Your Verification Code
               </h1>
-              <p style="margin:10px 0 0;color:rgba(255,255,255,.7);font-size:14px;">
-                Vikasana Foundation · Student Login
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 40px 0;">
+              <div style="width:40px;height:2px;background:#C9952A;"></div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:24px 40px 0;">
+              <p style="margin:0;font-size:15px;color:#475569;line-height:1.75;">
+                Hello <strong style="color:#0B1F4B;">{to_name}</strong>,
+                use the passcode below to sign in to your Vikasana account.
               </p>
             </td>
           </tr>
 
-          <!-- Body -->
+          <!-- OTP -->
           <tr>
-            <td style="padding:36px 40px;text-align:center;">
-              <p style="margin:0 0 6px;color:#475569;font-size:15px;">
-                Hello, <strong>{to_name}</strong>!
+            <td style="padding:32px 40px 0;text-align:center;">
+              <p style="margin:0 0 16px;font-size:11px;font-weight:600;color:#94A3B8;
+                        text-transform:uppercase;letter-spacing:1.2px;">
+                One-Time Passcode
               </p>
-              <p style="margin:0 0 32px;color:#64748b;font-size:14px;line-height:1.7;">
-                Use the one-time code below to sign in to your Vikasana account.
-              </p>
-
               {_otp_digits(otp)}
+            </td>
+          </tr>
 
-              <!-- Expiry badge -->
-              <table cellpadding="0" cellspacing="0" style="margin:26px auto;">
+          <!-- Expiry -->
+          <tr>
+            <td style="padding:20px 40px 0;text-align:center;">
+              <table cellpadding="0" cellspacing="0" style="margin:0 auto;">
                 <tr>
-                  <td style="background:#fef3c7;border-radius:100px;padding:9px 20px;">
-                    <p style="margin:0;font-size:13px;color:#92400e;font-weight:600;">
-                      ⏱ &nbsp;Expires in <strong>10 minutes</strong>
+                  <td style="background:#FEF3C7;border:1px solid #FDE68A;
+                             border-radius:100px;padding:8px 20px;">
+                    <p style="margin:0;font-size:12px;color:#92400E;font-weight:600;">
+                      &#x23F1;&nbsp; This code expires in <strong>10 minutes</strong>
                     </p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
 
-              <!-- Security note -->
+          <!-- Security note -->
+          <tr>
+            <td style="padding:24px 40px 36px;">
               <table width="100%" cellpadding="0" cellspacing="0"
-                     style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;">
+                     style="background:#F7F9FC;border:1px solid #E2E8F0;
+                            border-radius:4px;border-left:3px solid #94A3B8;">
                 <tr>
-                  <td style="padding:18px 20px;text-align:left;">
-                    <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
-                      🛡️ <strong>Security tip:</strong> Vikasana will never ask you to share
-                      this code with anyone. If you didn't request this, safely ignore this
-                      email — your account is safe.
+                  <td style="padding:14px 18px;">
+                    <p style="margin:0;font-size:13px;color:#64748B;line-height:1.65;">
+                      <strong>Security reminder:</strong> Vikasana Foundation will never
+                      ask you to share this code. If you did not initiate this request,
+                      please disregard this email — your account is secure.
                     </p>
                   </td>
                 </tr>
               </table>
-
-              <p style="margin:22px 0 0;font-size:12px;color:#94a3b8;">
+              <p style="margin:14px 0 0;font-size:12px;color:#94A3B8;">
                 Signing in as <strong>{to_email}</strong>
               </p>
             </td>
@@ -580,6 +707,6 @@ async def send_student_otp_email(to_email: str, to_name: str, otp: str) -> None:
         "sender":      {"name": from_name, "email": from_email},
         "to":          [{"email": to_email, "name": to_name}],
         "subject":     subject,
-        "htmlContent": _wrap(body),
+        "htmlContent": _wrap(body, from_email),
     }
     await _send(api_key, payload)
