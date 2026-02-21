@@ -16,10 +16,16 @@ class Faculty(Base):
 
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="faculty")
 
+    # Activation (invite link)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     activation_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     activation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # ✅ Password (set after OTP verification)
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Profile
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

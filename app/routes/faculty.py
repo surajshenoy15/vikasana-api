@@ -6,13 +6,33 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_admin
 from app.models.admin import Admin
 from app.models.faculty import Faculty
+
 from app.schemas.faculty import (
     FacultyCreateResponse,
     FacultyResponse,
     ActivateFacultyResponse,
     FacultyCreateRequest,
 )
-from app.controllers.faculty_controller import create_faculty, activate_faculty
+
+from app.schemas.faculty_activation import (
+    ActivationValidateResponse,
+    SendOtpRequest,
+    VerifyOtpRequest,
+    VerifyOtpResponse,
+    SetPasswordRequest,
+    SetPasswordResponse,
+)
+
+from app.controllers.faculty_controller import (
+    create_faculty,
+    # NEW FLOW
+    validate_activation_token_and_create_session,
+    send_activation_otp,
+    verify_activation_otp,
+    set_password_after_otp,
+    # OPTIONAL old flow (keep if you want)
+    activate_faculty,
+)
 
 router = APIRouter(prefix="/faculty", tags=["Faculty"])
 
@@ -71,14 +91,13 @@ async def list_faculty(
     items = q.scalars().all()
     return [FacultyResponse.model_validate(x) for x in items]
 
+
 @router.delete("/{faculty_id}", summary="Delete faculty member")
 async def delete_faculty(
     faculty_id: int,
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
 ):
-    from sqlalchemy import select
-    from app.models.faculty import Faculty
     result = await db.execute(select(Faculty).where(Faculty.id == faculty_id))
     faculty = result.scalar_one_or_none()
     if not faculty:
@@ -86,10 +105,76 @@ async def delete_faculty(
     await db.delete(faculty)
     await db.commit()
     return {"detail": f"Faculty {faculty_id} deleted"}
+
+
+# =========================================================
+# ✅ NEW ACTIVATION FLOW (OTP + Set Password)
+# =========================================================
+
+@router.get(
+    "/activation/validate",
+    response_model=ActivationValidateResponse,
+    summary="Validate activation token and create activation session",
+)
+async def activation_validate(
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    session_id, email_masked, expires_at = await validate_activation_token_and_create_session(token, db)
+    return {
+        "activation_session_id": session_id,
+        "email_masked": email_masked,
+        "expires_at": expires_at,
+    }
+
+
+@router.post(
+    "/activation/send-otp",
+    summary="Send OTP to faculty email",
+)
+async def activation_send_otp(
+    body: SendOtpRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    await send_activation_otp(body.activation_session_id, db)
+    return {"detail": "OTP sent successfully"}
+
+
+@router.post(
+    "/activation/verify-otp",
+    response_model=VerifyOtpResponse,
+    summary="Verify OTP and return set password token",
+)
+async def activation_verify_otp(
+    body: VerifyOtpRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    set_password_token = await verify_activation_otp(body.activation_session_id, body.otp, db)
+    return {"set_password_token": set_password_token}
+
+
+@router.post(
+    "/activation/set-password",
+    response_model=SetPasswordResponse,
+    summary="Set password after OTP verification",
+)
+async def activation_set_password(
+    body: SetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    await set_password_after_otp(body.set_password_token, body.new_password, db)
+    return {"detail": "Password set successfully. Account activated."}
+
+
+# =========================================================
+# OPTIONAL: OLD ACTIVATE ENDPOINT (not recommended)
+# Keep only if you want backward compatibility
+# =========================================================
+
 @router.get(
     "/activate",
     response_model=ActivateFacultyResponse,
-    summary="Activate faculty account via email token",
+    summary="(OLD) Activate faculty account via email token (no OTP)",
 )
 async def activate(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     await activate_faculty(token, db)

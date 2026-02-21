@@ -1,5 +1,6 @@
 import os
 import httpx
+import random
 
 
 async def send_activation_email(to_email: str, to_name: str, activate_url: str) -> None:
@@ -177,6 +178,72 @@ async def send_activation_email(to_email: str, to_name: str, activate_url: str) 
 
 </body>
 </html>"""
+
+    payload = {
+        "sender": {"name": from_name, "email": from_email},
+        "to":     [{"email": to_email, "name": to_name}],
+        "subject": subject,
+        "htmlContent": html,
+    }
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": api_key, "Content-Type": "application/json"},
+            json=payload,
+        )
+        if r.status_code >= 400:
+            raise RuntimeError(f"Brevo error {r.status_code}: {r.text}")
+
+
+# =========================================================
+# 🔐 NEW FUNCTION — OTP EMAIL (used after link click)
+# =========================================================
+
+async def send_faculty_otp_email(to_email: str, to_name: str, otp: str) -> None:
+    api_key = os.getenv("SENDINBLUE_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("SENDINBLUE_API_KEY not configured")
+
+    from_email = os.getenv("EMAIL_FROM", "admin@vikasana.org")
+    from_name  = os.getenv("EMAIL_FROM_NAME", "Vikasana Foundation")
+    subject    = "Your OTP Code — Vikasana Faculty Activation"
+
+    html = f"""
+    <div style="font-family:Segoe UI,Arial;padding:24px;background:#f1f5f9">
+      <div style="max-width:520px;margin:auto;background:white;border-radius:16px;padding:32px">
+        
+        <h2 style="margin-top:0;color:#0f2557">Hello {to_name},</h2>
+
+        <p style="font-size:15px;color:#334155">
+          Use the OTP below to continue activating your faculty account.
+        </p>
+
+        <div style="
+            margin:26px 0;
+            font-size:34px;
+            font-weight:800;
+            letter-spacing:8px;
+            text-align:center;
+            background:#f8fafc;
+            border-radius:12px;
+            padding:18px;
+            border:1px dashed #1565c0;
+            color:#1565c0;">
+            {otp}
+        </div>
+
+        <p style="font-size:13px;color:#64748b;margin-top:20px">
+          ⏱ This OTP expires in <b>10 minutes</b>.
+        </p>
+
+        <p style="font-size:12px;color:#94a3b8">
+          If you didn't request this, you can safely ignore this email.
+        </p>
+
+      </div>
+    </div>
+    """
 
     payload = {
         "sender": {"name": from_name, "email": from_email},

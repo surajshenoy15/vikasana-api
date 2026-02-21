@@ -3,6 +3,7 @@ import hashlib
 import hmac
 from datetime import datetime, timedelta, timezone
 from itsdangerous import URLSafeTimedSerializer
+import secrets
 
 
 def _serializer() -> URLSafeTimedSerializer:
@@ -28,3 +29,18 @@ def verify_token(token: str, max_age_seconds: int) -> dict:
 def activation_expiry_dt() -> datetime:
     hours = int(os.getenv("ACTIVATION_TOKEN_EXPIRE_HOURS", "48"))
     return datetime.now(timezone.utc) + timedelta(hours=hours)
+
+
+def generate_session_id() -> str:
+    return secrets.token_urlsafe(32)
+
+def generate_otp() -> str:
+    # 6-digit numeric OTP
+    import random
+    return f"{random.randint(0, 999999):06d}"
+
+def hash_otp(otp: str) -> str:
+    return hashlib.sha256(otp.encode("utf-8")).hexdigest()
+
+def constant_time_equals(a: str, b: str) -> bool:
+    return hmac.compare_digest(a, b)
