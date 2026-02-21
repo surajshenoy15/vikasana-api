@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_admin
+from app.core.dependencies import get_current_admin, get_current_faculty
 from app.models.admin import Admin
 from app.models.faculty import Faculty
 from app.models.student import Student
@@ -35,6 +35,10 @@ from app.controllers.faculty_controller import (
 
 router = APIRouter(prefix="/faculty", tags=["Faculty"])
 
+
+# =========================================================
+# ADMIN ONLY: CREATE / LIST / DELETE FACULTY
+# =========================================================
 
 @router.post(
     "",
@@ -91,7 +95,7 @@ async def list_faculty(
     return [FacultyResponse.model_validate(x) for x in items]
 
 
-@router.delete("/{faculty_id}", summary="Delete faculty member")
+@router.delete("/{faculty_id}", summary="Delete faculty member (Admin only)")
 async def delete_faculty(
     faculty_id: int,
     db: AsyncSession = Depends(get_db),
@@ -106,18 +110,26 @@ async def delete_faculty(
     return {"detail": f"Faculty {faculty_id} deleted"}
 
 
-# ✅ NEW: DASHBOARD STATS (fixes 404 for /api/faculty/dashboard/stats)
-@router.get("/dashboard/stats", summary="Faculty dashboard stats")
+# =========================================================
+# FACULTY APP: DASHBOARD STATS (keys match frontend)
+# GET /api/faculty/dashboard/stats
+# =========================================================
+
+@router.get("/dashboard/stats", summary="Faculty dashboard stats (Faculty auth)")
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
-    admin: Admin = Depends(get_current_admin),  # keep as admin-only; change to faculty if needed
+    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ Faculty token
 ):
-    total_students = await db.scalar(select(func.count()).select_from(Student))
-    total_faculty = await db.scalar(select(func.count()).select_from(Faculty))
+    students = await db.scalar(select(func.count()).select_from(Student))
 
+    # NOTE:
+    # You haven't implemented activity verification tables yet, so keep them 0 for now.
+    # Later you can compute verified/pending/rejected from Activity submissions table.
     return {
-        "total_students": int(total_students or 0),
-        "total_faculty": int(total_faculty or 0),
+        "students": int(students or 0),
+        "verified": 0,
+        "pending": 0,
+        "rejected": 0,
     }
 
 
