@@ -120,11 +120,13 @@ async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ Faculty token
 ):
-    students = await db.scalar(select(func.count()).select_from(Student))
+    # ✅ only count students from this faculty's college
+    students = await db.scalar(
+        select(func.count())
+        .select_from(Student)
+        .where(Student.college == current_faculty.college)
+    )
 
-    # NOTE:
-    # You haven't implemented activity verification tables yet, so keep them 0 for now.
-    # Later you can compute verified/pending/rejected from Activity submissions table.
     return {
         "students": int(students or 0),
         "verified": 0,
