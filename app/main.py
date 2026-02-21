@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_router
+from app.routes.students import router as students_router   # ✅ NEW
 
 
 app = FastAPI(
@@ -41,6 +42,7 @@ app.add_middleware(
 # ───────────────── ROUTES ─────────────────
 app.include_router(auth_router, prefix="/api")
 app.include_router(faculty_router, prefix="/api")
+app.include_router(students_router, prefix="/api")   # ✅ NEW
 
 # ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
