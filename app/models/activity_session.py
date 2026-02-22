@@ -1,8 +1,10 @@
-from sqlalchemy import Column, Integer, String, DateTime, Enum, ForeignKey, Float, func, Index
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, func, Index
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 import enum
 
 from app.core.database import Base
+
 
 class ActivitySessionStatus(str, enum.Enum):
     DRAFT = "DRAFT"
@@ -11,6 +13,7 @@ class ActivitySessionStatus(str, enum.Enum):
     FLAGGED = "FLAGGED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
+
 
 class ActivitySession(Base):
     __tablename__ = "activity_sessions"
@@ -26,15 +29,15 @@ class ActivitySession(Base):
 
     started_at = Column(DateTime(timezone=True), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
-
     submitted_at = Column(DateTime(timezone=True), nullable=True)
 
-    status = Column(Enum(ActivitySessionStatus), nullable=False, default=ActivitySessionStatus.DRAFT)
+    status = Column(
+        SAEnum(ActivitySessionStatus, name="activity_session_status_enum", create_type=False),
+        nullable=False,
+        default=ActivitySessionStatus.DRAFT,
+    )
 
-    # computed on submit
     duration_hours = Column(Float, nullable=True)
-
-    # if flagged
     flag_reason = Column(String(500), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -42,5 +45,6 @@ class ActivitySession(Base):
     student = relationship("Student", back_populates="activity_sessions")
     activity_type = relationship("ActivityType", back_populates="sessions")
     photos = relationship("ActivityPhoto", back_populates="session", cascade="all, delete-orphan")
+
 
 Index("ix_activity_sessions_student_type_day", ActivitySession.student_id, ActivitySession.activity_type_id, ActivitySession.started_at)
