@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, time, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from fastapi import HTTPException
+from sqlalchemy.orm import selectinload
 
 from app.models.activity_type import ActivityType, ActivityTypeStatus
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
@@ -246,3 +247,22 @@ async def _get_or_create_stats(db: AsyncSession, student_id: int, activity_type_
     await db.commit()
     await db.refresh(stats)
     return stats
+
+async def list_student_sessions(db, student_id: int):
+    res = await db.execute(
+        select(ActivitySession)
+        .where(ActivitySession.student_id == student_id)
+        .order_by(ActivitySession.id.desc())
+    )
+    return list(res.scalars().all())
+
+async def get_student_session_detail(db, student_id: int, session_id: int):
+    res = await db.execute(
+        select(ActivitySession)
+        .where(ActivitySession.id == session_id, ActivitySession.student_id == student_id)
+        .options(selectinload(ActivitySession.photos))
+    )
+    session = res.scalar_one_or_none()
+    if not session:
+        raise ValueError("Session not found")
+    return session

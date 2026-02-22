@@ -72,3 +72,18 @@ class SubmitSessionOut(BaseModel):
     newly_awarded_points: int
     total_points_for_type: int
     total_hours_for_type: float
+
+class SessionListItemOut(BaseModel):
+    id: int
+    activity_type_id: int
+    activity_name: str
+    description: Optional[str]
+    started_at: datetime
+    expires_at: datetime
+    submitted_at: Optional[datetime]
+    status: str
+    duration_hours: Optional[float]
+    flag_reason: Optional[str]
+
+class SessionDetailOut(SessionListItemOut):
+    photos: List["PhotoOut"] = []

@@ -127,3 +127,21 @@ async def admin_list_types(
     admin=Depends(get_current_admin),
 ):
     return await list_activity_types(db, include_pending=include_pending)
+
+
+from app.schemas.activity import SessionListItemOut, SessionDetailOut
+
+@router.get("/sessions", response_model=list[SessionListItemOut])
+async def my_sessions(
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    return await list_student_sessions(db, student.id)
+
+@router.get("/sessions/{session_id}", response_model=SessionDetailOut)
+async def session_detail(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    return await get_student_session_detail(db, student.id, session_id)
