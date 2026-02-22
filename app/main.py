@@ -12,7 +12,11 @@ from app.core.config import settings
 from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_router
 from app.routes.students import router as students_router  # Faculty - Students
-from app.routes.student_auth import router as student_auth_router  # ✅ NEW (Student OTP login)
+from app.routes.student_auth import router as student_auth_router  # ✅ Student OTP login
+
+# ✅ NEW: Activity Tracker routes
+from app.routes.activity import router as student_activity_router
+from app.routes.activity import admin_router as admin_activity_router
 
 
 app = FastAPI(
@@ -48,6 +52,19 @@ app.include_router(students_router, prefix="/api")
 # POST /api/auth/student/request-otp
 # POST /api/auth/student/verify-otp
 app.include_router(student_auth_router, prefix="/api")
+
+# ✅ Activity Tracker routes:
+# Student:
+# GET  /api/student/activity/types
+# POST /api/student/activity/types/request
+# POST /api/student/activity/sessions
+# POST /api/student/activity/sessions/{session_id}/photos
+# POST /api/student/activity/sessions/{session_id}/submit
+app.include_router(student_activity_router, prefix="/api")
+
+# Admin:
+# GET /api/admin/activity/types?include_pending=true
+app.include_router(admin_activity_router, prefix="/api")
 
 # ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])

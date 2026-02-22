@@ -22,6 +22,19 @@ def _parse_student_type(v: str) -> StudentType:
     return StudentType.REGULAR
 
 
+def _required_points_for_type(stype: StudentType) -> int:
+    return 60 if stype == StudentType.DIPLOMA else 100
+
+
+def _coerce_student_type(v) -> StudentType:
+    """
+    Accepts: StudentType enum OR string like 'REGULAR'/'DIPLOMA'
+    """
+    if isinstance(v, StudentType):
+        return v
+    return _parse_student_type(str(v))
+
+
 async def create_student(db: AsyncSession, payload: StudentCreate, faculty_college: str) -> Student:
     faculty_college = (faculty_college or "").strip()
     if not faculty_college:
@@ -42,13 +55,21 @@ async def create_student(db: AsyncSession, payload: StudentCreate, faculty_colle
         if e2.scalar_one_or_none():
             raise ValueError(f"Duplicate Email in this college: {payload.email}")
 
+    stype = _coerce_student_type(payload.student_type)
+    required_points = _required_points_for_type(stype)
+
     s = Student(
         college=faculty_college,  # ✅ enforce from faculty, not from client
         name=payload.name.strip(),
         usn=payload.usn.strip(),
         branch=payload.branch.strip(),
         email=str(payload.email) if payload.email else None,
-        student_type=StudentType(payload.student_type),
+        student_type=stype,
+
+        # ✅ NEW FIELDS (Activity Tracker)
+        required_total_points=required_points,
+        total_points_earned=0,
+
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
     )
@@ -117,7 +138,7 @@ async def create_students_from_csv(
             admitted_year = int(_clean(row.get("admitted_year")))
 
             email = _clean(row.get("email")) if "email" in headers else ""
-            stype = _clean(row.get("student_type")) if "student_type" in headers else ""
+            stype_raw = _clean(row.get("student_type")) if "student_type" in headers else ""
 
             if not name or not usn or not branch:
                 raise ValueError("name/usn/branch cannot be empty")
@@ -143,13 +164,21 @@ async def create_students_from_csv(
                         continue
                     raise ValueError(f"Duplicate Email in this college: {email}")
 
+            stype = _parse_student_type(stype_raw)
+            required_points = _required_points_for_type(stype)
+
             s = Student(
                 college=faculty_college,  # ✅ enforce from faculty
                 name=name,
                 usn=usn,
                 branch=branch,
                 email=email or None,
-                student_type=_parse_student_type(stype),
+                student_type=stype,
+
+                # ✅ NEW FIELDS (Activity Tracker)
+                required_total_points=required_points,
+                total_points_earned=0,
+
                 passout_year=passout_year,
                 admitted_year=admitted_year,
             )
