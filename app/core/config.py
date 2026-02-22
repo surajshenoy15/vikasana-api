@@ -28,7 +28,14 @@ class Settings(BaseSettings):
     MINIO_ENDPOINT: str = "127.0.0.1:9000"
     MINIO_ACCESS_KEY: str = ""
     MINIO_SECRET_KEY: str = ""
+
+    # ✅ Keep old key for backward compatibility
     MINIO_BUCKET: str = "vikasana-faculty"
+
+    # ✅ NEW: separate buckets (this fixes your ValidationError)
+    MINIO_BUCKET_FACULTY: str = "vikasana-faculty"
+    MINIO_BUCKET_ACTIVITIES: str = "vikasana-activities"
+
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_BASE: str = ""
 
@@ -45,6 +52,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        extra="forbid",  # keep strict (optional)
     )
 
     @property
