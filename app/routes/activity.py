@@ -18,6 +18,8 @@ from app.controllers.activity_controller import (
     create_session,
     add_photo_to_session,
     submit_session,
+    list_student_sessions,          # ✅ ADD
+    get_student_session_detail,      # ✅ ADD
 )
 
 # ✅ Use your MinIO-style uploader (bytes -> url)
