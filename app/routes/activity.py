@@ -82,7 +82,11 @@ async def upload_activity_photo(
 
     # 3) Parse captured_at
     from datetime import datetime
-    captured_at = datetime.fromisoformat(meta_captured_at)
+
+    s = meta_captured_at.strip()
+    s = s.replace("Z", "+00:00")          # allow Zulu
+    s = s.replace(" ", "+") if " " in s and "+" not in s else s  # allow " 00:00" style
+    captured_at = datetime.fromisoformat(s)
 
     # 4) Save photo record
     return await add_photo_to_session(
