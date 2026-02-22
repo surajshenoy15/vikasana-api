@@ -13,6 +13,7 @@ from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_router
 from app.routes.students import router as students_router  # Faculty - Students
 from app.routes.student_auth import router as student_auth_router  # ✅ Student OTP login
+from app.routes.activity_summary import router as activity_summary_router
 
 # ✅ NEW: Activity Tracker routes
 from app.routes.activity import router as student_activity_router
@@ -65,6 +66,7 @@ app.include_router(student_activity_router, prefix="/api")
 # Admin:
 # GET /api/admin/activity/types?include_pending=true
 app.include_router(admin_activity_router, prefix="/api")
+app.include_router(activity_summary_router, prefix="/api")
 
 # ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
