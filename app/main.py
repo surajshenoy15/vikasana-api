@@ -68,7 +68,7 @@ app.include_router(student_activity_router, prefix="/api")
 # GET /api/admin/activity/types?include_pending=true
 app.include_router(admin_activity_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
-app.include_router(events_router)
+app.include_router(events_router, prefix="/api")
 
 # ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
