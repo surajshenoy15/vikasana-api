@@ -1,3 +1,5 @@
+from typing import List
+
 from fastapi import APIRouter, Depends, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,31 +52,43 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
-@router.post("/student/submissions/{submission_id}/photos", response_model=PhotoOut)
-async def upload_photo(
+# ✅ MULTI UPLOAD
+@router.post("/student/submissions/{submission_id}/photos", response_model=list[PhotoOut])
+async def upload_photos(
     submission_id: int,
-    seq_no: int = Query(...),
-    image: UploadFile = File(...),
+    start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
+    images: List[UploadFile] = File(..., description="Upload multiple files with key 'images'"),
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    file_bytes = await image.read()
+    results: list[PhotoOut] = []
+    seq_no = start_seq
 
-    image_url = await upload_activity_image(
-        file_bytes=file_bytes,
-        content_type=image.content_type,
-        filename=image.filename,
-        student_id=student.id,
-        session_id=submission_id,
-    )
+    for img in images:
+        file_bytes = await img.read()
+        if not file_bytes:
+            continue
 
-    return await add_photo(
-        db,
-        submission_id=submission_id,
-        student_id=student.id,
-        seq_no=seq_no,
-        image_url=image_url,
-    )
+        image_url = await upload_activity_image(
+            file_bytes=file_bytes,
+            content_type=img.content_type or "application/octet-stream",
+            filename=img.filename or f"photo_{seq_no}.jpg",
+            student_id=student.id,
+            session_id=submission_id,
+        )
+
+        photo = await add_photo(
+            db=db,
+            submission_id=submission_id,
+            student_id=student.id,
+            seq_no=seq_no,
+            image_url=image_url,
+        )
+
+        results.append(photo)
+        seq_no += 1
+
+    return results
 
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
