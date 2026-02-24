@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # ✅ NEW: separate buckets (this fixes your ValidationError)
     MINIO_BUCKET_FACULTY: str = "vikasana-faculty"
     MINIO_BUCKET_ACTIVITIES: str = "vikasana-activities"
+    minio_bucket_event_thumbnails: str = "vikasana-event-thumbnails"
 
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_BASE: str = ""
