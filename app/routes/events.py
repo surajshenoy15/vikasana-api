@@ -6,6 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
 from app.core.activity_storage import upload_activity_image
+from app.schemas.events import ThumbnailUploadUrlIn, ThumbnailUploadUrlOut
+from app.controllers.events_controller import get_event_thumbnail_upload_url
 
 from app.schemas.events import (
     EventCreateIn, EventOut,
@@ -36,6 +38,19 @@ async def admin_create_event_api(
     admin=Depends(get_current_admin),
 ):
     return await create_event(db, payload)
+
+@router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
+async def admin_event_thumbnail_upload_url(
+    payload: ThumbnailUploadUrlIn,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    # db not needed but kept for pattern consistency
+    return await get_event_thumbnail_upload_url(
+        admin_id=admin.id,
+        filename=payload.filename,
+        content_type=payload.content_type,
+    )
 
 
 # ---------------- STUDENT ----------------

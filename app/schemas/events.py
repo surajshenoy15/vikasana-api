@@ -7,6 +7,7 @@ class EventCreateIn(BaseModel):
     title: str
     description: Optional[str] = None
     required_photos: int = Field(3, ge=3, le=5)
+    thumbnail_url: Optional[str] = None
 
 
 class EventOut(BaseModel):
@@ -15,9 +16,18 @@ class EventOut(BaseModel):
     description: Optional[str]
     required_photos: int
     is_active: bool
+    thumbnail_url: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+class ThumbnailUploadUrlIn(BaseModel):
+    filename: str
+    content_type: str
+
+class ThumbnailUploadUrlOut(BaseModel):
+    upload_url: str
+    public_url: str
 
 
 class RegisterOut(BaseModel):

@@ -5,7 +5,31 @@ from fastapi import HTTPException
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 
+from app.core.event_thumbnail_storage import (
+    EVENT_THUMBNAILS_BUCKET,
+    build_thumbnail_key,
+    public_url_for,
+    presign_put,
+)
 
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename required")
+
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported content_type. Use: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+        )
+
+    key = build_thumbnail_key(admin_id, filename)
+    upload_url = presign_put(EVENT_THUMBNAILS_BUCKET, key, content_type)
+    public_url = public_url_for(EVENT_THUMBNAILS_BUCKET, key)
+
+    return {"upload_url": upload_url, "public_url": public_url}
 # =========================================================
 # ---------------------- ADMIN -----------------------------
 # =========================================================
@@ -15,6 +39,7 @@ async def create_event(db: AsyncSession, payload):
         title=payload.title,
         description=payload.description,
         required_photos=payload.required_photos,
+        thumbnail_url=getattr(payload, "thumbnail_url", None),
         is_active=True
     )
     db.add(event)
