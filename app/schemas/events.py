@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional
+from datetime import datetime
 
 
 class EventCreateIn(BaseModel):
@@ -46,3 +47,20 @@ class SubmissionOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+class AdminSubmissionOut(BaseModel):
+    id: int
+    event_id: int
+    student_id: int
+    status: str
+    description: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RejectIn(BaseModel):
+    reason: str

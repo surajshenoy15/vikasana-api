@@ -10,7 +10,8 @@ from app.core.activity_storage import upload_activity_image
 from app.schemas.events import (
     EventCreateIn, EventOut,
     RegisterOut, PhotoOut,
-    FinalSubmitIn, SubmissionOut,EventSubmission,approve_submission,reject_submission
+    FinalSubmitIn, SubmissionOut,
+    AdminSubmissionOut, RejectIn
 )
 
 from app.controllers.events_controller import (
@@ -19,6 +20,9 @@ from app.controllers.events_controller import (
     register_for_event,
     add_photo,
     final_submit,
+    list_event_submissions,
+    approve_submission,
+    reject_submission,
 )
 
 router = APIRouter(tags=["Events"])
@@ -61,7 +65,7 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    results: list[PhotoOut] = []
+    results = []
     seq_no = start_seq
 
     for img in images:
@@ -100,33 +104,31 @@ async def submit_event(
 ):
     return await final_submit(db, submission_id, student.id, payload.description)
 
-@router.get("/admin/events/{event_id}/submissions")
-async def list_event_submissions(
+
+# ---------------- ADMIN: REVIEW ----------------
+@router.get("/admin/events/{event_id}/submissions", response_model=list[AdminSubmissionOut])
+async def admin_list_event_submissions(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    from sqlalchemy import select
-    q = await db.execute(
-        select(EventSubmission).where(
-            EventSubmission.event_id == event_id
-        )
-    )
-    return q.scalars().all()
+    return await list_event_submissions(db, event_id)
 
-@router.post("/admin/submissions/{submission_id}/approve")
-async def approve_event_submission(
+
+@router.post("/admin/submissions/{submission_id}/approve", response_model=AdminSubmissionOut)
+async def approve_event_submission_api(
     submission_id: int,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
     return await approve_submission(db, submission_id)
 
-@router.post("/admin/submissions/{submission_id}/reject")
-async def reject_event_submission(
+
+@router.post("/admin/submissions/{submission_id}/reject", response_model=AdminSubmissionOut)
+async def reject_event_submission_api(
     submission_id: int,
-    reason: str,
+    payload: RejectIn,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    return await reject_submission(db, submission_id, reason)
+    return await reject_submission(db, submission_id, payload.reason)
