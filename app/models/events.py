@@ -16,8 +16,10 @@ class Event(Base):
 
     required_photos = Column(Integer, nullable=False, default=3)
     is_active = Column(Boolean, default=True)
+    
 
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    thumbnail_url = Column(String, nullable=True)
 
     submissions = relationship("EventSubmission", back_populates="event")
 
