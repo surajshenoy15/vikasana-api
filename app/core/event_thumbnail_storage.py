@@ -1,30 +1,44 @@
+import os
 import uuid
 from datetime import timedelta
-from urllib.parse import quote
 
-from app.core.minio_client import minio_client  # use your existing client
-from app.core.config import settings
+from fastapi import HTTPException
 
-EVENT_THUMBNAILS_BUCKET = "vikasana-event-thumbnails"
+from app.core.minio_client import get_minio, ensure_bucket
 
 
-def build_thumbnail_key(admin_id: int, filename: str) -> str:
-    safe_name = filename.replace(" ", "_")
-    return f"thumbnails/{admin_id}/{uuid.uuid4().hex}_{safe_name}"
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
-def public_url_for(bucket: str, key: str) -> str:
-    # If you already have MINIO_PUBLIC_BASE_URL in settings, use it.
-    # Example: http://31.97.230.171:9000
-    base = getattr(settings, "MINIO_PUBLIC_BASE_URL", None) or settings.MINIO_ENDPOINT_PUBLIC
-    return f"{base}/{bucket}/{quote(key)}"
+async def generate_event_thumbnail_presigned_put(
+    filename: str,
+    content_type: str,
+    admin_id: int,
+):
+    if content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid content_type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}",
+        )
 
+    minio = get_minio()
 
-def presign_put(bucket: str, key: str, content_type: str) -> str:
-    # MinIO presigned PUT
-    # NOTE: For some MinIO setups, content-type must be provided by client on PUT.
-    return minio_client.presigned_put_object(
+    bucket = os.getenv("MINIO_BUCKET_EVENT_THUMBNAILS", "vikasana-event-thumbnails")
+    ensure_bucket(minio, bucket)
+
+    ext = filename.split(".")[-1].lower() if "." in filename else "jpg"
+    object_name = f"thumbnails/{admin_id}/{uuid.uuid4().hex}.{ext}"
+
+    upload_url = minio.presigned_put_object(
         bucket,
-        key,
+        object_name,
         expires=timedelta(minutes=15),
     )
+
+    public_base = os.getenv("MINIO_PUBLIC_BASE", "").rstrip("/")
+    if public_base:
+        public_url = f"{public_base}/{bucket}/{object_name}"
+    else:
+        public_url = minio.presigned_get_object(bucket, object_name)
+
+    return {"upload_url": upload_url, "public_url": public_url}
