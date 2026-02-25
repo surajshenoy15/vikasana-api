@@ -11,16 +11,23 @@ from fastapi.responses import JSONResponse
 from starlette.status import HTTP_422_UNPROCESSABLE_ENTITY
 
 from app.core.config import settings
+
+# ───────────────── ROUTER IMPORTS ─────────────────
 from app.routes.auth import router as auth_router
-from app.routes.faculty import router as faculty_router
-from app.routes.students import router as students_router
+from app.routes.faculty import router as faculty_main_router
 from app.routes.student_auth import router as student_auth_router
 from app.routes.activity_summary import router as activity_summary_router
 from app.routes.events import router as events_router
+
+# activity routers (student + admin)
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
-from app.routers.students import faculty_router, admin_router
 
+# ✅ students routers (faculty + admin) from the NEW students file
+from app.routers.students import (
+    faculty_router as faculty_students_router,
+    admin_router as admin_students_router,
+)
 
 app = FastAPI(
     title="Vikasana Foundation API",
@@ -68,16 +75,25 @@ app.add_middleware(
 )
 
 # ───────────────── ROUTES ─────────────────
+# NOTE:
+# - We DO NOT include old app.routes.students anymore (to avoid conflicts/404 confusion)
+# - We include NEW students routers: /api/faculty/students and /api/admin/students
 
 app.include_router(auth_router, prefix="/api")
-app.include_router(faculty_router, prefix="/api")
-app.include_router(students_router, prefix="/api")
-app.include_router(student_auth_router, prefix="/api")
-app.include_router(faculty_router, prefix="/api")
-app.include_router(admin_router, prefix="/api")
+app.include_router(faculty_main_router, prefix="/api")
 
+# ✅ Students
+app.include_router(faculty_students_router, prefix="/api")  # /api/faculty/students
+app.include_router(admin_students_router, prefix="/api")    # /api/admin/students
+
+# Auth for students (OTP etc)
+app.include_router(student_auth_router, prefix="/api")
+
+# Activities
 app.include_router(student_activity_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
+
+# Summary + Events
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 
@@ -90,6 +106,7 @@ async def root():
         "app": "Vikasana Foundation API",
         "env": settings.APP_ENV,
     }
+
 
 @app.get("/health", tags=["Health"])
 async def health():
