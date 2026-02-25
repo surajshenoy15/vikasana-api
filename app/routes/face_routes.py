@@ -189,13 +189,16 @@ async def enroll_face(
     student.face_enrolled = True
     student.face_enrolled_at = datetime.utcnow()
 
+    # ✅ persist
+    await db.commit()
+    await db.refresh(student)
+
     return {
         "success": True,
         "student_id": student_id,
         "photos_processed": len(embeddings),
         "photos_failed": failed,
     }
-
 
 # --------------------------------------------------
 # VERIFY ACTIVITY SESSION (downloads from MinIO, saves boxed to MinIO)
@@ -229,6 +232,10 @@ async def verify_session(
     if not photo:
         raise HTTPException(status_code=400, detail="No activity photo found.")
 
+    # ✅ Strong validation (optional but recommended)
+    if hasattr(photo, "student_id") and photo.student_id is not None and photo.student_id != session.student_id:
+        raise HTTPException(status_code=400, detail="photo.student_id does not match session.student_id")
+
     # 1) Download original photo from activity bucket
     try:
         image_bytes = await read_image_bytes_from_minio(photo.image_url)
@@ -256,21 +263,38 @@ async def verify_session(
     except Exception:
         processed_object = None
 
-    # ✅ 5) SAVE RESULT INTO DB (activity_face_checks)
-    face_check = ActivityFaceCheck(
-        session_id=session.id,
-        photo_id=photo.id,
-        matched=matched,
-        cosine_score=match.get("cosine_score"),
-        l2_score=match.get("l2_score"),
-        total_faces=match.get("total_faces"),
-        processed_object=processed_object,
-        reason=match.get("reason"),
+    # ✅ 5) UPSERT RESULT INTO DB (activity_face_checks)
+    existing_stmt = select(ActivityFaceCheck).where(
+        ActivityFaceCheck.session_id == session.id,
+        ActivityFaceCheck.photo_id == photo.id,
     )
-    db.add(face_check)
+    existing_res = await db.execute(existing_stmt)
+    face_check = existing_res.scalar_one_or_none()
 
-    # flush so face_check.id is generated before we use it
-    await db.flush()
+    if face_check:
+        # update existing
+        face_check.student_id = session.student_id  # ✅ REQUIRED
+        face_check.matched = matched
+        face_check.cosine_score = match.get("cosine_score")
+        face_check.l2_score = match.get("l2_score")
+        face_check.total_faces = match.get("total_faces")
+        face_check.processed_object = processed_object
+        face_check.reason = match.get("reason")
+    else:
+        # create new
+        face_check = ActivityFaceCheck(
+            student_id=session.student_id,  # ✅ FIXED (no more NULL)
+            session_id=session.id,
+            photo_id=photo.id,
+            matched=matched,
+            cosine_score=match.get("cosine_score"),
+            l2_score=match.get("l2_score"),
+            total_faces=match.get("total_faces"),
+            processed_object=processed_object,
+            reason=match.get("reason"),
+        )
+        db.add(face_check)
+        await db.flush()  # get face_check.id
 
     # OPTIONAL: only if you added latest_face_check_id column in activity_sessions
     if hasattr(session, "latest_face_check_id"):
@@ -281,7 +305,9 @@ async def verify_session(
         session.status = ActivitySessionStatus.FLAGGED
         session.flag_reason = f"Face mismatch: {match.get('reason')}"
 
-    # NOTE: No need await db.commit() because your get_db() commits after request.
+    # ✅ Commit changes
+    await db.commit()
+    await db.refresh(face_check)
 
     return {
         "matched": matched,
