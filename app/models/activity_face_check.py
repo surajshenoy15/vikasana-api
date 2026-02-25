@@ -11,21 +11,55 @@ class ActivityFaceCheck(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
-    session_id = Column(Integer, ForeignKey("activity_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
-    photo_id   = Column(Integer, ForeignKey("activity_photos.id", ondelete="CASCADE"), nullable=False, index=True)
+    student_id = Column(
+        Integer,
+        ForeignKey("students.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_id = Column(
+        Integer,
+        ForeignKey("activity_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    photo_id = Column(
+        Integer,
+        ForeignKey("activity_photos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
+    # --------------------------------------------------
+    # Face Verification Results
+    # --------------------------------------------------
     matched = Column(Boolean, nullable=False, default=False)
 
     cosine_score = Column(Float, nullable=True)
-    l2_score     = Column(Float, nullable=True)
-    total_faces  = Column(Integer, nullable=True)
+    l2_score = Column(Float, nullable=True)
+    total_faces = Column(Integer, nullable=True)
 
+    # --------------------------------------------------
+    # Image References
+    # --------------------------------------------------
+    # ✅ REQUIRED by DB (NOT NULL): original activity image url/key used for verification
+    raw_image_url = Column(Text, nullable=False)
+
+    # boxed/annotated output stored in MINIO_FACE_BUCKET
     processed_object = Column(Text, nullable=True)
-    reason          = Column(Text, nullable=True)
 
+    reason = Column(Text, nullable=True)
+
+    # --------------------------------------------------
+    # Metadata
+    # --------------------------------------------------
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
 
     __table_args__ = (
         UniqueConstraint("session_id", "photo_id", name="uq_face_checks_session_photo"),
@@ -33,6 +67,9 @@ class ActivityFaceCheck(Base):
         Index("ix_face_checks_student_session", "student_id", "session_id"),
     )
 
+    # --------------------------------------------------
+    # Relationships
+    # --------------------------------------------------
     student = relationship("Student", back_populates="face_checks", lazy="joined")
     session = relationship("ActivitySession", back_populates="face_checks", lazy="joined")
-    photo   = relationship("ActivityPhoto", back_populates="face_checks", lazy="joined")
+    photo = relationship("ActivityPhoto", back_populates="face_checks", lazy="joined")

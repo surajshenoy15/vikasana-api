@@ -58,13 +58,15 @@ def _extract_object_key(image_url: str) -> str:
 
     # If full URL, remove protocol+domain
     if "://" in s:
-        # split after domain
         parts = s.split("://", 1)[1].split("/", 1)
         if len(parts) == 2:
             s = parts[1]  # now "bucket/key..."
 
     # If starts with bucket name, strip it
-    for b in [getattr(settings, "MINIO_BUCKET_ACTIVITIES", ""), getattr(settings, "MINIO_FACE_BUCKET", "")]:
+    for b in [
+        getattr(settings, "MINIO_BUCKET_ACTIVITIES", ""),
+        getattr(settings, "MINIO_FACE_BUCKET", ""),
+    ]:
         if b and (s == b or s.startswith(b + "/")):
             s = s[len(b):].lstrip("/")
             break
@@ -125,11 +127,9 @@ def draw_box(image_bytes: bytes, face_box: list | None, matched: bool) -> bytes:
         cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
         (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
         cv2.rectangle(img, (x, y - text_h - 10), (x + text_w, y), color, -1)
-        cv2.putText(img, label, (x, y - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        cv2.putText(img, label, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     elif not matched:
-        cv2.putText(img, "STUDENT NOT FOUND", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.putText(img, "STUDENT NOT FOUND", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
     _, buffer = cv2.imencode(".jpg", img)
     return buffer.tobytes()
@@ -189,7 +189,6 @@ async def enroll_face(
     student.face_enrolled = True
     student.face_enrolled_at = datetime.utcnow()
 
-    # ✅ persist
     await db.commit()
     await db.refresh(student)
 
@@ -199,6 +198,7 @@ async def enroll_face(
         "photos_processed": len(embeddings),
         "photos_failed": failed,
     }
+
 
 # --------------------------------------------------
 # VERIFY ACTIVITY SESSION (downloads from MinIO, saves boxed to MinIO)
@@ -232,7 +232,7 @@ async def verify_session(
     if not photo:
         raise HTTPException(status_code=400, detail="No activity photo found.")
 
-    # ✅ Strong validation (optional but recommended)
+    # Optional validation
     if hasattr(photo, "student_id") and photo.student_id is not None and photo.student_id != session.student_id:
         raise HTTPException(status_code=400, detail="photo.student_id does not match session.student_id")
 
@@ -272,8 +272,8 @@ async def verify_session(
     face_check = existing_res.scalar_one_or_none()
 
     if face_check:
-        # update existing
-        face_check.student_id = session.student_id  # ✅ REQUIRED
+        face_check.student_id = session.student_id
+        face_check.raw_image_url = photo.image_url  # ✅ REQUIRED
         face_check.matched = matched
         face_check.cosine_score = match.get("cosine_score")
         face_check.l2_score = match.get("l2_score")
@@ -281,11 +281,11 @@ async def verify_session(
         face_check.processed_object = processed_object
         face_check.reason = match.get("reason")
     else:
-        # create new
         face_check = ActivityFaceCheck(
-            student_id=session.student_id,  # ✅ FIXED (no more NULL)
+            student_id=session.student_id,
             session_id=session.id,
             photo_id=photo.id,
+            raw_image_url=photo.image_url,  # ✅ REQUIRED
             matched=matched,
             cosine_score=match.get("cosine_score"),
             l2_score=match.get("l2_score"),
@@ -294,7 +294,7 @@ async def verify_session(
             reason=match.get("reason"),
         )
         db.add(face_check)
-        await db.flush()  # get face_check.id
+        await db.flush()
 
     # OPTIONAL: only if you added latest_face_check_id column in activity_sessions
     if hasattr(session, "latest_face_check_id"):
@@ -305,7 +305,6 @@ async def verify_session(
         session.status = ActivitySessionStatus.FLAGGED
         session.flag_reason = f"Face mismatch: {match.get('reason')}"
 
-    # ✅ Commit changes
     await db.commit()
     await db.refresh(face_check)
 
@@ -314,6 +313,7 @@ async def verify_session(
         "cosine_score": match.get("cosine_score"),
         "l2_score": match.get("l2_score"),
         "total_faces": match.get("total_faces"),
+        "raw_image_url": photo.image_url,
         "processed_object": processed_object,
         "face_check_id": face_check.id,
         "reason": match.get("reason"),
