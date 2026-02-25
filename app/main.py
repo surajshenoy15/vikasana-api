@@ -23,8 +23,8 @@ from app.routes.events import router as events_router
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
 
-# ✅ students routers (faculty + admin) from the NEW students file
-from app.routers.students import (
+# ✅ students routers (faculty + admin) from app/routes/students.py
+from app.routes.students import (
     faculty_router as faculty_students_router,
     admin_router as admin_students_router,
 )
@@ -75,14 +75,11 @@ app.add_middleware(
 )
 
 # ───────────────── ROUTES ─────────────────
-# NOTE:
-# - We DO NOT include old app.routes.students anymore (to avoid conflicts/404 confusion)
-# - We include NEW students routers: /api/faculty/students and /api/admin/students
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(faculty_main_router, prefix="/api")
 
-# ✅ Students
+# ✅ Students (NEW)
 app.include_router(faculty_students_router, prefix="/api")  # /api/faculty/students
 app.include_router(admin_students_router, prefix="/api")    # /api/admin/students
 
@@ -111,13 +108,3 @@ async def root():
 @app.get("/health", tags=["Health"])
 async def health():
     return {"status": "healthy"}
-
-@app.get("/debug/routes", tags=["Debug"])
-async def debug_routes():
-    out = []
-    for r in app.router.routes:
-        methods = getattr(r, "methods", None)
-        path = getattr(r, "path", None)
-        if methods and path:
-            out.append({"methods": sorted(list(methods)), "path": path})
-    return out
