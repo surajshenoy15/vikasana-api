@@ -1,5 +1,6 @@
 from enum import Enum
 from typing import List, Optional
+from datetime import datetime
 
 from sqlalchemy import (
     String,
@@ -9,6 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Enum as SAEnum,
     Boolean,
+    Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,16 +32,18 @@ class StudentType(str, Enum):
 
 class Student(Base):
     __tablename__ = "students"
+
     __table_args__ = (
         UniqueConstraint("usn", name="uq_students_usn"),
         UniqueConstraint("email", name="uq_students_email"),
+        Index("ix_students_college_branch", "college", "branch"),
     )
 
     # --------------------------------------------------
     # PRIMARY KEY
     # --------------------------------------------------
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     # --------------------------------------------------
     # BASIC DETAILS
@@ -92,7 +96,7 @@ class Student(Base):
         index=True,
     )
 
-    face_enrolled_at: Mapped[Optional[DateTime]] = mapped_column(
+    face_enrolled_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )
@@ -104,7 +108,7 @@ class Student(Base):
     passout_year: Mapped[int] = mapped_column(Integer, nullable=False)
     admitted_year: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    created_at: Mapped[DateTime] = mapped_column(
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
@@ -126,10 +130,15 @@ class Student(Base):
         cascade="all, delete-orphan",
     )
 
-    # 🔥 Face Embedding (1 record per student recommended)
     face_embeddings: Mapped[List["StudentFaceEmbedding"]] = relationship(
         "StudentFaceEmbedding",
         back_populates="student",
         cascade="all, delete-orphan",
-        uselist=True,
+    )
+
+    # ✅ IMPORTANT: Face Checks relationship (needed for verification system)
+    face_checks: Mapped[List["ActivityFaceCheck"]] = relationship(
+        "ActivityFaceCheck",
+        back_populates="student",
+        cascade="all, delete-orphan",
     )

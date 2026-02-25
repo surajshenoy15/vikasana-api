@@ -56,10 +56,7 @@ class ActivityFaceCheck(Base):
     l2_score = Column(Float, nullable=True)
     total_faces = Column(Integer, nullable=True)
 
-    # Object key inside MINIO_FACE_BUCKET
     processed_object = Column(Text, nullable=True)
-
-    # Reason for mismatch / debug info
     reason = Column(Text, nullable=True)
 
     # --------------------------------------------------
@@ -71,25 +68,46 @@ class ActivityFaceCheck(Base):
         nullable=False,
     )
 
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
     # --------------------------------------------------
-    # Constraints
-    # Prevent duplicate checks for same photo
+    # Constraints + Indexes
     # --------------------------------------------------
     __table_args__ = (
+        # Prevent duplicate verification for same photo in session
         UniqueConstraint(
             "session_id",
             "photo_id",
             name="uq_face_checks_session_photo",
         ),
-        Index("ix_face_checks_student_id", "student_id"),
-        Index("ix_face_checks_session_id", "session_id"),
-        Index("ix_face_checks_photo_id", "photo_id"),
+
+        # Useful analytics indexes
         Index("ix_face_checks_matched", "matched"),
+        Index("ix_face_checks_student_session", "student_id", "session_id"),
     )
 
     # --------------------------------------------------
     # Relationships
     # --------------------------------------------------
-    student = relationship("Student", lazy="joined")
-    session = relationship("ActivitySession", lazy="joined")
-    photo = relationship("ActivityPhoto", lazy="joined")
+    student = relationship(
+        "Student",
+        back_populates="face_checks",
+        lazy="joined",
+    )
+
+    session = relationship(
+        "ActivitySession",
+        back_populates="face_checks",
+        lazy="joined",
+    )
+
+    photo = relationship(
+        "ActivityPhoto",
+        back_populates="face_checks",
+        lazy="joined",
+    )
