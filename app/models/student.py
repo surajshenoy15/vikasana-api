@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy import (
     String,
@@ -8,6 +8,7 @@ from sqlalchemy import (
     func,
     UniqueConstraint,
     Enum as SAEnum,
+    Boolean,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -34,16 +35,26 @@ class Student(Base):
         UniqueConstraint("email", name="uq_students_email"),
     )
 
+    # --------------------------------------------------
+    # PRIMARY KEY
+    # --------------------------------------------------
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
 
-    # ✅ College isolation
-    college: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    # --------------------------------------------------
+    # BASIC DETAILS
+    # --------------------------------------------------
 
+    college: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     usn: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
     branch: Mapped[str] = mapped_column(String(80), nullable=False)
 
-    email: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    email: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+    )
 
     student_type: Mapped[StudentType] = mapped_column(
         SAEnum(StudentType, name="student_type_enum"),
@@ -51,9 +62,10 @@ class Student(Base):
         server_default=StudentType.REGULAR.value,
     )
 
-    # ✅ NEW: Total points required for course completion
-    # REGULAR = 100
-    # DIPLOMA = 60
+    # --------------------------------------------------
+    # POINTS SYSTEM
+    # --------------------------------------------------
+
     required_total_points: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -61,13 +73,33 @@ class Student(Base):
         server_default="100",
     )
 
-    # ✅ NEW: Track total points earned (fast dashboard lookup)
     total_points_earned: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
         server_default="0",
     )
+
+    # --------------------------------------------------
+    # FACE ENROLLMENT SYSTEM
+    # --------------------------------------------------
+
+    face_enrolled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+        index=True,
+    )
+
+    face_enrolled_at: Mapped[Optional[DateTime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # --------------------------------------------------
+    # ACADEMIC YEARS
+    # --------------------------------------------------
 
     passout_year: Mapped[int] = mapped_column(Integer, nullable=False)
     admitted_year: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -79,7 +111,7 @@ class Student(Base):
     )
 
     # --------------------------------------------------
-    # RELATIONSHIPS (Activity Tracker)
+    # RELATIONSHIPS
     # --------------------------------------------------
 
     activity_sessions: Mapped[List["ActivitySession"]] = relationship(
@@ -92,4 +124,12 @@ class Student(Base):
         "StudentActivityStats",
         back_populates="student",
         cascade="all, delete-orphan",
+    )
+
+    # 🔥 Face Embedding (1 record per student recommended)
+    face_embeddings: Mapped[List["StudentFaceEmbedding"]] = relationship(
+        "StudentFaceEmbedding",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        uselist=True,
     )

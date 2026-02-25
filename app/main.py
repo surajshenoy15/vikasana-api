@@ -29,6 +29,10 @@ from app.routes.students import (
     admin_router as admin_students_router,
 )
 
+# ✅ NEW: Face router
+from app.routes.face_routes import router as face_router
+
+
 app = FastAPI(
     title="Vikasana Foundation API",
     description="Backend API for the Vikasana Admin Panel",
@@ -38,7 +42,6 @@ app = FastAPI(
 )
 
 # ───────── SAFE VALIDATION HANDLER (FIXES UNICODE CRASH) ─────────
-
 def _sanitize(obj):
     if isinstance(obj, (bytes, bytearray)):
         return f"<bytes:{len(obj)}>"
@@ -58,7 +61,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 # ───────────────── CORS ─────────────────
-
 origins = settings.origins_list or [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -75,7 +77,6 @@ app.add_middleware(
 )
 
 # ───────────────── ROUTES ─────────────────
-
 app.include_router(auth_router, prefix="/api")
 app.include_router(faculty_main_router, prefix="/api")
 
@@ -94,8 +95,10 @@ app.include_router(admin_activity_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 
-# ───────────────── HEALTH ─────────────────
+# ✅ Face Recognition
+app.include_router(face_router, prefix="/api")  # final endpoints -> /api/face/...
 
+# ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
 async def root():
     return {
