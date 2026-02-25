@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+import csv
+import io
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin, get_current_faculty
@@ -14,6 +16,9 @@ from app.schemas.faculty import (
     ActivateFacultyResponse,
     FacultyCreateRequest,
 )
+
+# ✅ Option 1: separate schema file
+from app.schemas.faculty_import import FacultyImportResponse, FailedRow
 
 from app.schemas.faculty_activation import (
     ActivationValidateResponse,
@@ -81,6 +86,96 @@ async def add_faculty(
     }
 
 
+@router.post(
+    "/import-csv",
+    response_model=FacultyImportResponse,
+    summary="Import Faculty via CSV (Admin only)",
+)
+async def import_faculty_csv(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    admin: Admin = Depends(get_current_admin),
+):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a .csv file")
+
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")  # handles BOM
+    except Exception:
+        raise HTTPException(status_code=400, detail="CSV must be UTF-8 encoded")
+
+    reader = csv.DictReader(io.StringIO(text))
+
+    if not reader.fieldnames:
+        raise HTTPException(status_code=400, detail="CSV has no header row")
+
+    required = {"full_name", "email", "college", "role"}
+    headers = {h.strip() for h in reader.fieldnames if h}
+    missing = required - headers
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing columns: {', '.join(sorted(missing))}")
+
+    created_faculty: list[FacultyResponse] = []
+    failed_rows: list[FailedRow] = []
+    created_count = 0
+    email_sent_count = 0
+
+    # CSV header is row 1
+    row_number = 1
+
+    for row in reader:
+        row_number += 1
+        try:
+            full_name = (row.get("full_name") or "").strip()
+            email = (row.get("email") or "").strip().lower()
+            college = (row.get("college") or "").strip()
+            role = (row.get("role") or "faculty").strip() or "faculty"
+
+            if not full_name:
+                raise ValueError("full_name is required")
+            if not email or "@" not in email:
+                raise ValueError("valid email is required")
+            if not college:
+                raise ValueError("college is required")
+
+            # prevent duplicates
+            existing = await db.execute(select(Faculty).where(Faculty.email == email))
+            if existing.scalar_one_or_none():
+                raise ValueError("email already exists")
+
+            payload = FacultyCreateRequest(
+                full_name=full_name,
+                college=college,
+                email=email,
+                role=role,
+            )
+
+            faculty, email_sent = await create_faculty(
+                payload=payload,
+                db=db,
+                image_bytes=None,
+                image_content_type=None,
+                image_filename=None,
+            )
+
+            created_faculty.append(FacultyResponse.model_validate(faculty))
+            created_count += 1
+            if email_sent:
+                email_sent_count += 1
+
+        except Exception as e:
+            failed_rows.append(FailedRow(row_number=row_number, error=str(e)))
+
+    return FacultyImportResponse(
+        created_count=created_count,
+        failed_count=len(failed_rows),
+        activation_email_sent_count=email_sent_count,
+        failed_rows=failed_rows,
+        created_faculty=created_faculty,
+    )
+
+
 @router.get(
     "",
     response_model=list[FacultyResponse],
@@ -118,9 +213,8 @@ async def delete_faculty(
 @router.get("/dashboard/stats", summary="Faculty dashboard stats (Faculty auth)")
 async def dashboard_stats(
     db: AsyncSession = Depends(get_db),
-    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ Faculty token
+    current_faculty: Faculty = Depends(get_current_faculty),
 ):
-    # ✅ only count students from this faculty's college
     students = await db.scalar(
         select(func.count())
         .select_from(Student)
