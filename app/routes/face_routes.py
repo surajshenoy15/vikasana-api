@@ -15,6 +15,7 @@ from app.models.student import Student
 from app.models.student_face_embedding import StudentFaceEmbedding
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_photo import ActivityPhoto
+from app.models.activity_face_check import ActivityFaceCheck
 
 # OpenCV face recognition module
 from app.services import face_service as cv_face_service
@@ -243,35 +244,51 @@ async def verify_session(
     matched = bool(match.get("matched"))
     face_box = match.get("matched_face_box") if matched else None
 
-    # 3) Create boxed image (always create; helps admin even on fail)
+    # 3) Create boxed image (always create)
     boxed_bytes = draw_box(image_bytes, face_box, matched)
 
     # 4) Save boxed image to MINIO_FACE_BUCKET
     processed_object = None
     try:
-        processed_object = await save_boxed_image_to_minio(boxed_bytes, session_id=session.id, photo_id=photo.id)
-    except Exception as e:
-        # Don't fail verification if upload fails; just return without processed object
+        processed_object = await save_boxed_image_to_minio(
+            boxed_bytes, session_id=session.id, photo_id=photo.id
+        )
+    except Exception:
         processed_object = None
 
-    if matched:
-        return {
-            "matched": True,
-            "cosine_score": match.get("cosine_score"),
-            "l2_score": match.get("l2_score"),
-            "total_faces": match.get("total_faces"),
-            "processed_object": processed_object,  # stored in face-verification bucket
-        }
+    # ✅ 5) SAVE RESULT INTO DB (activity_face_checks)
+    face_check = ActivityFaceCheck(
+        session_id=session.id,
+        photo_id=photo.id,
+        matched=matched,
+        cosine_score=match.get("cosine_score"),
+        l2_score=match.get("l2_score"),
+        total_faces=match.get("total_faces"),
+        processed_object=processed_object,
+        reason=match.get("reason"),
+    )
+    db.add(face_check)
+
+    # flush so face_check.id is generated before we use it
+    await db.flush()
+
+    # OPTIONAL: only if you added latest_face_check_id column in activity_sessions
+    if hasattr(session, "latest_face_check_id"):
+        session.latest_face_check_id = face_check.id
 
     # If failed → FLAG SESSION
-    session.status = ActivitySessionStatus.FLAGGED
-    session.flag_reason = f"Face mismatch: {match.get('reason')}"
+    if not matched:
+        session.status = ActivitySessionStatus.FLAGGED
+        session.flag_reason = f"Face mismatch: {match.get('reason')}"
+
+    # NOTE: No need await db.commit() because your get_db() commits after request.
 
     return {
-        "matched": False,
-        "reason": match.get("reason"),
+        "matched": matched,
         "cosine_score": match.get("cosine_score"),
         "l2_score": match.get("l2_score"),
         "total_faces": match.get("total_faces"),
         "processed_object": processed_object,
+        "face_check_id": face_check.id,
+        "reason": match.get("reason"),
     }
