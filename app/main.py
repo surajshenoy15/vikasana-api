@@ -27,6 +27,7 @@ from app.routes.activity import admin_router as admin_activity_router
 from app.routes.students import (
     faculty_router as faculty_students_router,
     admin_router as admin_students_router,
+    student_router as student_profile_router,  # ✅ ADD THIS
 )
 
 # ✅ NEW: Face router
@@ -83,6 +84,7 @@ app.include_router(faculty_main_router, prefix="/api")
 # ✅ Students (NEW)
 app.include_router(faculty_students_router, prefix="/api")  # /api/faculty/students
 app.include_router(admin_students_router, prefix="/api")    # /api/admin/students
+app.include_router(student_profile_router, prefix="/api")    # ✅ /api/students/me
 
 # Auth for students (OTP etc)
 app.include_router(student_auth_router, prefix="/api")
