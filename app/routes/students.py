@@ -4,6 +4,7 @@ from sqlalchemy import select, or_
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_faculty, get_current_admin
+from app.core.dependencies import get_current_student
 from app.models.faculty import Faculty
 from app.models.admin import Admin
 from app.models.student import Student
@@ -158,3 +159,24 @@ async def list_students_admin(
 
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
+
+
+@student_router.get("/me")
+async def get_student_me(
+    current_student: Student = Depends(get_current_student),
+):
+    return {
+        "id": current_student.id,
+        "name": current_student.name,
+        "email": current_student.email,
+        "college": current_student.college,
+        "usn": current_student.usn,
+        "branch": current_student.branch,
+        "face_enrolled": current_student.face_enrolled,
+        "face_enrolled_at": current_student.face_enrolled_at,
+        "required_total_points": current_student.required_total_points,
+        "total_points_earned": current_student.total_points_earned,
+    }
