@@ -18,7 +18,7 @@ class Event(Base):
     is_active = Column(Boolean, default=True)
     event_date = Column(Date, nullable=True)
     start_time = Column(Time, nullable=True)
-    
+    end_time   = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
     thumbnail_url = Column(String, nullable=True)
