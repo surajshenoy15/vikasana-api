@@ -18,6 +18,7 @@ from app.schemas.events import (
 
 from app.controllers.events_controller import (
     create_event,
+    delete_event,           # ← added
     list_active_events,
     register_for_event,
     add_photo,
@@ -31,6 +32,7 @@ router = APIRouter(tags=["Events"])
 
 
 # ---------------- ADMIN ----------------
+
 @router.post("/admin/events", response_model=EventOut)
 async def admin_create_event_api(
     payload: EventCreateIn,
@@ -39,13 +41,16 @@ async def admin_create_event_api(
 ):
     return await create_event(db, payload)
 
+
+# ⚠️  IMPORTANT: /admin/events/thumbnail-upload-url MUST come BEFORE
+#    /admin/events/{event_id} — otherwise FastAPI matches "thumbnail-upload-url"
+#    as the event_id path param and routing breaks.
 @router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
 async def admin_event_thumbnail_upload_url(
     payload: ThumbnailUploadUrlIn,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # db not needed but kept for pattern consistency
     return await get_event_thumbnail_upload_url(
         admin_id=admin.id,
         filename=payload.filename,
@@ -53,7 +58,18 @@ async def admin_event_thumbnail_upload_url(
     )
 
 
+@router.delete("/admin/events/{event_id}", status_code=204)
+async def admin_delete_event_api(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """Delete an event and all its submissions + photos. Returns 204."""
+    await delete_event(db, event_id)
+
+
 # ---------------- STUDENT ----------------
+
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
     db: AsyncSession = Depends(get_db),
@@ -121,6 +137,7 @@ async def submit_event(
 
 
 # ---------------- ADMIN: REVIEW ----------------
+
 @router.get("/admin/events/{event_id}/submissions", response_model=list[AdminSubmissionOut])
 async def admin_list_event_submissions(
     event_id: int,

@@ -2,6 +2,7 @@ from datetime import datetime
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
+from sqlalchemy import select, delete as sql_delete
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 
@@ -16,6 +17,7 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
         content_type=content_type,
         admin_id=admin_id,
     )
+
 # =========================================================
 # ---------------------- ADMIN -----------------------------
 # =========================================================
@@ -32,6 +34,41 @@ async def create_event(db: AsyncSession, payload):
     await db.commit()
     await db.refresh(event)
     return event
+
+
+async def delete_event(db: AsyncSession, event_id: int) -> None:
+    """
+    Hard-delete an event and all its submissions + photos.
+    """
+    # 1. Check event exists
+    result = await db.execute(select(Event).where(Event.id == event_id))
+    event = result.scalar_one_or_none()
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # 2. Get all submission IDs for this event
+    sub_result = await db.execute(
+        select(EventSubmission.id).where(EventSubmission.event_id == event_id)
+    )
+    submission_ids = [row[0] for row in sub_result.fetchall()]
+
+    if submission_ids:
+        # 2a. Delete all photos for those submissions
+        await db.execute(
+            sql_delete(EventSubmissionPhoto).where(
+                EventSubmissionPhoto.submission_id.in_(submission_ids)
+            )
+        )
+        # 2b. Delete all submissions for this event
+        await db.execute(
+            sql_delete(EventSubmission).where(
+                EventSubmission.event_id == event_id
+            )
+        )
+
+    # 3. Delete the event itself
+    await db.execute(sql_delete(Event).where(Event.id == event_id))
+    await db.commit()
 
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
@@ -55,8 +92,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     submission.status = "approved"
     submission.approved_at = datetime.utcnow()
-
-    # 🔥 Future: certificate generation trigger can be added here
 
     await db.commit()
     await db.refresh(submission)
