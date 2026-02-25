@@ -3,27 +3,113 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime
 import base64
-import cv2
-import numpy as np
+import uuid
+from io import BytesIO
+import anyio
+
+from minio import Minio
 
 from app.core.database import get_db
+from app.core.config import settings
 from app.models.student import Student
 from app.models.student_face_embedding import StudentFaceEmbedding
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_photo import ActivityPhoto
 
-# rename to avoid confusion with "service layer"
+# OpenCV face recognition module
 from app.services import face_service as cv_face_service
 
 
 router = APIRouter(prefix="/face", tags=["Face Recognition"])
 
 
+# -----------------------------
+# MinIO Client (sync client, called in thread)
+# -----------------------------
+minio_client = Minio(
+    settings.MINIO_ENDPOINT,
+    access_key=settings.MINIO_ACCESS_KEY,
+    secret_key=settings.MINIO_SECRET_KEY,
+    secure=settings.MINIO_SECURE,
+)
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
 def file_to_b64(file_bytes: bytes) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode()
 
 
+def _extract_object_key(image_url: str) -> str:
+    """
+    Accepts:
+    - "folder/file.jpg" (preferred)
+    - "http://host:9000/bucket/folder/file.jpg"
+    - "bucket/folder/file.jpg"
+    Returns "folder/file.jpg" key.
+    """
+    s = (image_url or "").strip()
+    if not s:
+        raise ValueError("Empty image_url")
+
+    s = s.replace("\\", "/")
+
+    # If full URL, remove protocol+domain
+    if "://" in s:
+        # split after domain
+        parts = s.split("://", 1)[1].split("/", 1)
+        if len(parts) == 2:
+            s = parts[1]  # now "bucket/key..."
+
+    # If starts with bucket name, strip it
+    for b in [getattr(settings, "MINIO_BUCKET_ACTIVITIES", ""), getattr(settings, "MINIO_FACE_BUCKET", "")]:
+        if b and (s == b or s.startswith(b + "/")):
+            s = s[len(b):].lstrip("/")
+            break
+
+    return s
+
+
+async def read_image_bytes_from_minio(object_key_or_url: str) -> bytes:
+    bucket = settings.MINIO_BUCKET_ACTIVITIES  # your activity-uploads
+    object_name = _extract_object_key(object_key_or_url)
+
+    def _read():
+        resp = minio_client.get_object(bucket, object_name)
+        try:
+            return resp.read()
+        finally:
+            resp.close()
+            resp.release_conn()
+
+    return await anyio.to_thread.run_sync(_read)
+
+
+async def save_boxed_image_to_minio(image_bytes: bytes, session_id: int, photo_id: int) -> str:
+    """
+    Saves annotated image into MINIO_FACE_BUCKET and returns object key.
+    """
+    bucket = settings.MINIO_FACE_BUCKET  # face-verification
+    object_name = f"{session_id}/{photo_id}_boxed_{uuid.uuid4().hex}.jpg"
+
+    def _put():
+        minio_client.put_object(
+            bucket,
+            object_name,
+            BytesIO(image_bytes),
+            length=len(image_bytes),
+            content_type="image/jpeg",
+        )
+
+    await anyio.to_thread.run_sync(_put)
+    return object_name
+
+
 def draw_box(image_bytes: bytes, face_box: list | None, matched: bool) -> bytes:
+    import cv2
+    import numpy as np
+
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -49,10 +135,8 @@ def draw_box(image_bytes: bytes, face_box: list | None, matched: bool) -> bytes:
 
 
 # --------------------------------------------------
-# ENROLL FACE (CURRENT: 3-5 selfies averaged)
-# NOTE: if you need strict 5 angles, tell me — I'll change API to pose-based.
+# ENROLL FACE (3–5 selfies averaged)
 # --------------------------------------------------
-
 @router.post("/enroll/{student_id}")
 async def enroll_face(
     student_id: int,
@@ -83,7 +167,7 @@ async def enroll_face(
     if len(embeddings) < 3:
         raise HTTPException(
             status_code=422,
-            detail=f"Only {len(embeddings)} valid faces found.",
+            detail=f"Only {len(embeddings)} valid faces found (need >= 3). Failed={failed}.",
         )
 
     avg_embedding = cv_face_service.average_embeddings(embeddings)
@@ -95,11 +179,9 @@ async def enroll_face(
     if record:
         record.set_embedding(avg_embedding)
         record.photo_count = len(embeddings)
+        record.updated_at = datetime.utcnow()
     else:
-        record = StudentFaceEmbedding(
-            student_id=student_id,
-            photo_count=len(embeddings),
-        )
+        record = StudentFaceEmbedding(student_id=student_id, photo_count=len(embeddings))
         record.set_embedding(avg_embedding)
         db.add(record)
 
@@ -108,15 +190,15 @@ async def enroll_face(
 
     return {
         "success": True,
+        "student_id": student_id,
         "photos_processed": len(embeddings),
         "photos_failed": failed,
     }
 
 
 # --------------------------------------------------
-# VERIFY ACTIVITY SESSION (flags session on mismatch)
+# VERIFY ACTIVITY SESSION (downloads from MinIO, saves boxed to MinIO)
 # --------------------------------------------------
-
 @router.post("/verify-session/{session_id}")
 async def verify_session(
     session_id: int,
@@ -136,39 +218,52 @@ async def verify_session(
     if not record:
         raise HTTPException(status_code=404, detail="No face record found.")
 
-    stmt = select(ActivityPhoto).where(ActivityPhoto.session_id == session_id).order_by(ActivityPhoto.captured_at.desc())
+    stmt = (
+        select(ActivityPhoto)
+        .where(ActivityPhoto.session_id == session_id)
+        .order_by(ActivityPhoto.captured_at.desc())
+    )
     result = await db.execute(stmt)
     photo = result.scalars().first()
     if not photo:
         raise HTTPException(status_code=400, detail="No activity photo found.")
 
-    # YOU implement this
-    image_bytes = await read_image_bytes(photo.image_url)
+    # 1) Download original photo from activity bucket
+    try:
+        image_bytes = await read_image_bytes_from_minio(photo.image_url)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read activity image from MinIO: {str(e)}")
 
+    # 2) Match
     match = cv_face_service.match_in_group(
         file_to_b64(image_bytes),
         record.get_embedding(),
     )
 
-    # Create annotated image bytes (for admin view)
-    annotated_bytes = draw_box(
-        image_bytes,
-        match.get("matched_face_box") if match.get("matched") else None,
-        bool(match.get("matched")),
-    )
+    matched = bool(match.get("matched"))
+    face_box = match.get("matched_face_box") if matched else None
 
-    # OPTIONAL: store annotated image and save its URL for admin (recommended)
-    # annotated_url = await save_processed_image_and_get_url(annotated_bytes, session_id, photo.id)
-    # (add to DB via ActivityFaceCheck model later)
+    # 3) Create boxed image (always create; helps admin even on fail)
+    boxed_bytes = draw_box(image_bytes, face_box, matched)
 
-    if match["matched"]:
+    # 4) Save boxed image to MINIO_FACE_BUCKET
+    processed_object = None
+    try:
+        processed_object = await save_boxed_image_to_minio(boxed_bytes, session_id=session.id, photo_id=photo.id)
+    except Exception as e:
+        # Don't fail verification if upload fails; just return without processed object
+        processed_object = None
+
+    if matched:
         return {
             "matched": True,
             "cosine_score": match.get("cosine_score"),
             "l2_score": match.get("l2_score"),
             "total_faces": match.get("total_faces"),
+            "processed_object": processed_object,  # stored in face-verification bucket
         }
 
+    # If failed → FLAG SESSION
     session.status = ActivitySessionStatus.FLAGGED
     session.flag_reason = f"Face mismatch: {match.get('reason')}"
 
@@ -178,11 +273,5 @@ async def verify_session(
         "cosine_score": match.get("cosine_score"),
         "l2_score": match.get("l2_score"),
         "total_faces": match.get("total_faces"),
+        "processed_object": processed_object,
     }
-
-
-async def read_image_bytes(image_url: str) -> bytes:
-    """
-    Implement based on your storage (MinIO/S3/local).
-    """
-    raise NotImplementedError

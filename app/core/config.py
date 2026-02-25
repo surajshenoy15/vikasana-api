@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     MINIO_BUCKET_FACULTY: str = "vikasana-faculty"
     MINIO_BUCKET_ACTIVITIES: str = "vikasana-activities"
     minio_bucket_event_thumbnails: str = "vikasana-event-thumbnails"
+    MINIO_FACE_BUCKET="face-verification"
+    MINIO_BUCKET_ACTIVITIES="activity-uploads"
 
     MINIO_SECURE: bool = False
     MINIO_PUBLIC_BASE: str = ""
