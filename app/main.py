@@ -111,3 +111,13 @@ async def root():
 @app.get("/health", tags=["Health"])
 async def health():
     return {"status": "healthy"}
+
+@app.get("/debug/routes", tags=["Debug"])
+async def debug_routes():
+    out = []
+    for r in app.router.routes:
+        methods = getattr(r, "methods", None)
+        path = getattr(r, "path", None)
+        if methods and path:
+            out.append({"methods": sorted(list(methods)), "path": path})
+    return out
