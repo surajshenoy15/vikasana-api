@@ -27,8 +27,14 @@ async def create_event(db: AsyncSession, payload):
         title=payload.title,
         description=payload.description,
         required_photos=payload.required_photos,
+        is_active=True,
+
+        # ✅ SAVE THESE
+        event_date=getattr(payload, "event_date", None),
+        start_time=getattr(payload, "start_time", None),
+        end_time=getattr(payload, "end_time", None),
+
         thumbnail_url=getattr(payload, "thumbnail_url", None),
-        is_active=True
     )
     db.add(event)
     await db.commit()

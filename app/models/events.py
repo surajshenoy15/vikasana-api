@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Text, Boolean,
-    DateTime, ForeignKey, UniqueConstraint
+    DateTime, ForeignKey, UniqueConstraint,Date, Time
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -16,6 +16,8 @@ class Event(Base):
 
     required_photos = Column(Integer, nullable=False, default=3)
     is_active = Column(Boolean, default=True)
+    event_date = Column(Date, nullable=True)
+    start_time = Column(Time, nullable=True)
     
 
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow)

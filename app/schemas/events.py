@@ -1,12 +1,16 @@
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
+from datetime import datetime 
+from datetime import date, time
 
 
 class EventCreateIn(BaseModel):
     title: str
     description: Optional[str] = None
     required_photos: int = Field(3, ge=3, le=5)
+    event_date: Optional[date] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
     thumbnail_url: Optional[str] = None
 
 
@@ -16,6 +20,9 @@ class EventOut(BaseModel):
     description: Optional[str]
     required_photos: int
     is_active: bool
+    event_date: Optional[date] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
     thumbnail_url: Optional[str] = None
 
     class Config:
