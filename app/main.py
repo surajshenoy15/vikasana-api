@@ -19,6 +19,7 @@ from app.routes.activity_summary import router as activity_summary_router
 from app.routes.events import router as events_router
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
+from app.routers.students import faculty_router, admin_router
 
 
 app = FastAPI(
@@ -72,6 +73,8 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(faculty_router, prefix="/api")
 app.include_router(students_router, prefix="/api")
 app.include_router(student_auth_router, prefix="/api")
+app.include_router(faculty_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 app.include_router(student_activity_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
