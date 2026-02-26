@@ -1,3 +1,4 @@
+# app/routes/activity.py
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -27,7 +28,8 @@ from app.controllers.activity_controller import (
 )
 
 from app.core.activity_storage import upload_activity_image
-from app.models.activity_photo import ActivityPhoto  # ✅ needed for next seq_no lookup
+from app.models.activity_photo import ActivityPhoto
+from app.models.activity_session import ActivitySession, ActivitySessionStatus
 
 
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
@@ -36,7 +38,7 @@ legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
 
 
 # ─────────────────────────────────────────────────────────────
-# Datetime parsing helper (FIX)
+# Datetime parsing helper
 # ─────────────────────────────────────────────────────────────
 def _normalize_ddmmyyyy_date(date_part: str) -> str:
     parts = date_part.strip().split("/")
@@ -136,13 +138,37 @@ def parse_captured_at(meta_captured_at: str):
 
 
 # ─────────────────────────────────────────────────────────────
-# seq_no helper (NEW)
+# seq_no helper
 # ─────────────────────────────────────────────────────────────
 async def _next_seq_no(db: AsyncSession, session_id: int) -> int:
     q = select(func.max(ActivityPhoto.seq_no)).where(ActivityPhoto.session_id == session_id)
     res = await db.execute(q)
     mx = res.scalar_one_or_none()
     return int(mx or 0) + 1
+
+
+# ─────────────────────────────────────────────────────────────
+# session pre-check helper (IMPORTANT: prevents MinIO waste)
+# ─────────────────────────────────────────────────────────────
+async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_id: int):
+    res = await db.execute(
+        select(ActivitySession).where(
+            ActivitySession.id == session_id,
+            ActivitySession.student_id == student_id,
+        )
+    )
+    session = res.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.status != ActivitySessionStatus.DRAFT:
+        raise HTTPException(status_code=400, detail="Cannot upload photos after submission")
+
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    if session.expires_at and now > session.expires_at:
+        session.status = ActivitySessionStatus.EXPIRED
+        await db.commit()
+        raise HTTPException(status_code=400, detail="Session expired")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -187,8 +213,11 @@ async def _handle_photo_upload_and_save(
     lng: float,
     sha256: str | None,
     image: UploadFile,
-    seq_no: int | None,  # ✅ NEW
+    seq_no: int | None,
 ) -> PhotoOut:
+    # 0) Validate session BEFORE upload (prevents wasted MinIO uploads)
+    await _assert_session_uploadable(db, student_id, session_id)
+
     # 1) Read bytes
     file_bytes = await image.read()
     if not file_bytes:
@@ -210,12 +239,12 @@ async def _handle_photo_upload_and_save(
     if seq_no is None:
         seq_no = await _next_seq_no(db, session_id)
 
-    # 5) Save photo record (upsert handled in controller)
+    # 5) Save photo record
     return await add_photo_to_session(
         db=db,
         student_id=student_id,
         session_id=session_id,
-        seq_no=seq_no,  # ✅ NEW (requires controller update below)
+        seq_no=seq_no,
         image_url=image_url,
         captured_at=captured_at,
         lat=lat,
@@ -227,19 +256,16 @@ async def _handle_photo_upload_and_save(
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
-
-    # ✅ your frontend should send this; if not, we auto-generate
     seq_no: int | None = Query(
-        None, ge=1, description="Photo sequence number (1..required_photos). If omitted, server auto-assigns next."
+        None,
+        ge=1,
+        description="Photo sequence number (1..required_photos). If omitted, server auto-assigns next.",
     ),
-
     meta_captured_at: str = Query(..., description="ISO preferred; also accepts DD/MM/YYYY, hh:mm:ss am/pm"),
     lat: float = Query(...),
     lng: float = Query(...),
     sha256: str | None = Query(None),
-
     image: UploadFile = File(...),
-
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -289,7 +315,7 @@ async def session_detail(
 
 
 # ─────────────────────────────────────────────────────────────
-# Admin - Activity (minimal)
+# Admin - Activity
 # ─────────────────────────────────────────────────────────────
 @admin_router.get("/types", response_model=list[ActivityTypeOut])
 async def admin_list_types(
@@ -308,34 +334,24 @@ async def admin_list_types(
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
 async def legacy_upload_submission_photo(
     submission_id: int,
-
-    # ✅ NOW USED as seq_no if frontend doesn't send anything else
     start_seq: int = Query(1, ge=1),
-
     meta_captured_at: str | None = Query(None),
     captured_at: str | None = Query(None),
-
     lat: float | None = Query(None),
     lng: float | None = Query(None),
     latitude: float | None = Query(None),
     longitude: float | None = Query(None),
-
     sha256: str | None = Query(None),
-
     meta_captured_at_f: str | None = Form(None),
     captured_at_f: str | None = Form(None),
-
     lat_f: float | None = Form(None),
     lng_f: float | None = Form(None),
     latitude_f: float | None = Form(None),
     longitude_f: float | None = Form(None),
-
     sha256_f: str | None = Form(None),
-
     image: UploadFile | None = File(None),
     file: UploadFile | None = File(None),
     photo: UploadFile | None = File(None),
-
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -382,7 +398,9 @@ async def legacy_upload_submission_photo(
             },
         )
 
-    # ✅ Legacy: use start_seq as seq_no
+    # Validate session BEFORE upload
+    await _assert_session_uploadable(db, student.id, submission_id)
+
     return await _handle_photo_upload_and_save(
         db=db,
         student_id=student.id,

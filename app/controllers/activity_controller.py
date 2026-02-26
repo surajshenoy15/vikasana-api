@@ -1,5 +1,6 @@
+# app/controllers/activity_controller.py
 import secrets
-from datetime import datetime, timedelta, time, timezone
+from datetime import datetime, time, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -8,7 +9,7 @@ from fastapi import HTTPException
 from app.models.activity_type import ActivityType, ActivityTypeStatus
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_photo import ActivityPhoto
-from app.models.student_activity_stats import StudentActivityStats
+from app.models.student_activity_stats import StudentActivityStats  # kept (used in future)
 from app.controllers.activity_photos_controller import add_activity_photo
 from app.schemas.activity import PhotoOut
 
@@ -105,6 +106,24 @@ async def create_session(
 
 
 # ─────────────────────────────────────────────
+# List Sessions (FIXED: was missing and caused ImportError)
+# ─────────────────────────────────────────────
+
+async def list_student_sessions(db: AsyncSession, student_id: int):
+    """
+    Returns all sessions for the logged-in student.
+    Used by:
+      GET /api/student/activity/sessions
+    """
+    res = await db.execute(
+        select(ActivitySession)
+        .where(ActivitySession.student_id == student_id)
+        .order_by(ActivitySession.started_at.desc())
+    )
+    return res.scalars().all()
+
+
+# ─────────────────────────────────────────────
 # Add Photo
 # ─────────────────────────────────────────────
 
@@ -145,7 +164,7 @@ async def add_photo_to_session(
     if seq_no < 1 or seq_no > MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {MAX_PHOTOS}")
 
-    # 5) Optional: prevent exceeding max photos count
+    # 5) Prevent exceeding max photos count (count-based guard)
     count_res = await db.execute(
         select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
     )
@@ -200,9 +219,9 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
     if len(photos) < MIN_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Minimum {MIN_PHOTOS} photos required")
 
-    photo_times = []
+    photo_times: list[datetime] = []
     suspicious = False
-    reasons = []
+    reasons: list[str] = []
 
     for ph in photos:
         photo_times.append(ph.captured_at)
@@ -215,7 +234,7 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
             suspicious = True
             reasons.append("photo_outside_time_window")
 
-        if ph.sha256:
+        if getattr(ph, "sha256", None):
             dup2 = await db.execute(
                 select(ActivityPhoto.id).where(
                     ActivityPhoto.session_id == session_id,
@@ -246,7 +265,7 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
 # Session Detail
 # ─────────────────────────────────────────────
 
-async def get_student_session_detail(db, student_id: int, session_id: int):
+async def get_student_session_detail(db: AsyncSession, student_id: int, session_id: int):
     res = await db.execute(
         select(ActivitySession)
         .where(
@@ -262,22 +281,24 @@ async def get_student_session_detail(db, student_id: int, session_id: int):
 
     photos = list(session.photos or [])
 
-    sha_counts = {}
+    sha_counts: dict[str, int] = {}
     for ph in photos:
-        if ph.sha256:
+        if getattr(ph, "sha256", None):
             sha_counts[ph.sha256] = sha_counts.get(ph.sha256, 0) + 1
 
     photos_out = []
     for ph in photos:
-        photos_out.append({
-            "id": ph.id,
-            "image_url": ph.image_url,
-            "sha256": ph.sha256,
-            "captured_at": ph.captured_at,
-            "lat": ph.lat,
-            "lng": ph.lng,
-            "is_duplicate": bool(ph.sha256 and sha_counts.get(ph.sha256, 0) > 1),
-        })
+        photos_out.append(
+            {
+                "id": ph.id,
+                "image_url": ph.image_url,
+                "sha256": getattr(ph, "sha256", None),
+                "captured_at": ph.captured_at,
+                "lat": ph.lat,
+                "lng": ph.lng,
+                "is_duplicate": bool(getattr(ph, "sha256", None) and sha_counts.get(ph.sha256, 0) > 1),
+            }
+        )
 
     return {
         "id": session.id,
@@ -287,7 +308,7 @@ async def get_student_session_detail(db, student_id: int, session_id: int):
         "started_at": session.started_at,
         "expires_at": session.expires_at,
         "submitted_at": session.submitted_at,
-        "status": session.status.value,
+        "status": session.status.value if hasattr(session.status, "value") else str(session.status),
         "duration_hours": session.duration_hours,
         "flag_reason": session.flag_reason,
         "photos": photos_out,
