@@ -95,7 +95,7 @@ app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
 # ✅ ADD THIS LINE
-app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
+app.include_router(admin_sessions_router, prefix="/api") # no prefix # -> /api/admin/sessions
 
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
