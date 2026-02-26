@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
@@ -26,6 +27,7 @@ from app.controllers.activity_controller import (
 )
 
 from app.core.activity_storage import upload_activity_image
+from app.models.activity_photo import ActivityPhoto  # ✅ needed for next seq_no lookup
 
 
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
@@ -37,8 +39,6 @@ legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
 # Datetime parsing helper (FIX)
 # ─────────────────────────────────────────────────────────────
 def _normalize_ddmmyyyy_date(date_part: str) -> str:
-    # "26/2/2026" -> "26/02/2026"
-    # "6/11/2026" -> "06/11/2026"
     parts = date_part.strip().split("/")
     if len(parts) != 3:
         return date_part.strip()
@@ -52,7 +52,7 @@ def parse_captured_at(meta_captured_at: str):
       - ISO: 2026-02-26T11:39:49+05:30 / 2026-02-26T06:09:49Z
       - DD/MM/YYYY, hh:mm:ss am/pm  (example: 26/2/2026, 11:39:49 am)
       - DD/MM/YYYY hh:mm:ss am/pm
-      - DD-MM-YYYY, hh:mm:ss am/pm (common variant)
+      - DD-MM-YYYY, hh:mm:ss am/pm
     If timezone missing, assumes Asia/Kolkata.
     """
     from datetime import datetime
@@ -66,26 +66,20 @@ def parse_captured_at(meta_captured_at: str):
     try:
         iso = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(iso)
-        # If ISO but naive, attach Kolkata
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
         return dt
     except ValueError:
         pass
 
-    # 2) Try DD/MM/YYYY formats (your current frontend)
-    # Normalize date part to 2-digit day/month.
-    # Example input: "26/2/2026, 11:39:49 am"
     cleaned = s
     cleaned = cleaned.replace(" AM", " am").replace(" PM", " pm")
     cleaned = cleaned.replace(" a.m.", " am").replace(" p.m.", " pm")
     cleaned = cleaned.strip()
 
-    # Split date/time on comma if present
     if "," in cleaned:
         date_part, time_part = [x.strip() for x in cleaned.split(",", 1)]
     else:
-        # maybe "26/2/2026 11:39:49 am"
         parts = cleaned.split()
         if len(parts) >= 2:
             date_part = parts[0].strip()
@@ -101,7 +95,6 @@ def parse_captured_at(meta_captured_at: str):
         cleaned,
     ]
 
-    # Common formats to try
     fmts = [
         "%d/%m/%Y, %I:%M:%S %p",
         "%d/%m/%Y %I:%M:%S %p",
@@ -117,12 +110,10 @@ def parse_captured_at(meta_captured_at: str):
     for cand in candidates:
         if not cand:
             continue
-        # Make AM/PM consistent for strptime
         cand2 = cand.replace(" am", " AM").replace(" pm", " PM")
         for fmt in fmts:
             try:
                 dt = datetime.strptime(cand2, fmt)
-                # Attach timezone since this format has no offset
                 dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
                 return dt
             except ValueError as e:
@@ -142,6 +133,16 @@ def parse_captured_at(meta_captured_at: str):
             "error": str(last_err) if last_err else "unparseable",
         },
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# seq_no helper (NEW)
+# ─────────────────────────────────────────────────────────────
+async def _next_seq_no(db: AsyncSession, session_id: int) -> int:
+    q = select(func.max(ActivityPhoto.seq_no)).where(ActivityPhoto.session_id == session_id)
+    res = await db.execute(q)
+    mx = res.scalar_one_or_none()
+    return int(mx or 0) + 1
 
 
 # ─────────────────────────────────────────────────────────────
@@ -186,6 +187,7 @@ async def _handle_photo_upload_and_save(
     lng: float,
     sha256: str | None,
     image: UploadFile,
+    seq_no: int | None,  # ✅ NEW
 ) -> PhotoOut:
     # 1) Read bytes
     file_bytes = await image.read()
@@ -204,11 +206,16 @@ async def _handle_photo_upload_and_save(
     # 3) Parse captured_at (flexible)
     captured_at = parse_captured_at(meta_captured_at)
 
-    # 4) Save photo record (upsert handled in controller)
+    # 4) Decide seq_no
+    if seq_no is None:
+        seq_no = await _next_seq_no(db, session_id)
+
+    # 5) Save photo record (upsert handled in controller)
     return await add_photo_to_session(
         db=db,
         student_id=student_id,
         session_id=session_id,
+        seq_no=seq_no,  # ✅ NEW (requires controller update below)
         image_url=image_url,
         captured_at=captured_at,
         lat=lat,
@@ -220,11 +227,19 @@ async def _handle_photo_upload_and_save(
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
-    meta_captured_at: str = Query(..., description="ISO datetime preferred; also accepts DD/MM/YYYY, hh:mm:ss am/pm"),
+
+    # ✅ your frontend should send this; if not, we auto-generate
+    seq_no: int | None = Query(
+        None, ge=1, description="Photo sequence number (1..required_photos). If omitted, server auto-assigns next."
+    ),
+
+    meta_captured_at: str = Query(..., description="ISO preferred; also accepts DD/MM/YYYY, hh:mm:ss am/pm"),
     lat: float = Query(...),
     lng: float = Query(...),
     sha256: str | None = Query(None),
+
     image: UploadFile = File(...),
+
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -237,6 +252,7 @@ async def upload_activity_photo(
         lng=lng,
         sha256=sha256,
         image=image,
+        seq_no=seq_no,
     )
 
 
@@ -293,10 +309,9 @@ async def admin_list_types(
 async def legacy_upload_submission_photo(
     submission_id: int,
 
-    # frontend sends this (accepted, ignored)
+    # ✅ NOW USED as seq_no if frontend doesn't send anything else
     start_seq: int = Query(1, ge=1),
 
-    # accept multiple param names (query)
     meta_captured_at: str | None = Query(None),
     captured_at: str | None = Query(None),
 
@@ -307,7 +322,6 @@ async def legacy_upload_submission_photo(
 
     sha256: str | None = Query(None),
 
-    # accept multiple param names (form)
     meta_captured_at_f: str | None = Form(None),
     captured_at_f: str | None = Form(None),
 
@@ -318,7 +332,6 @@ async def legacy_upload_submission_photo(
 
     sha256_f: str | None = Form(None),
 
-    # accept multiple file field names
     image: UploadFile | None = File(None),
     file: UploadFile | None = File(None),
     photo: UploadFile | None = File(None),
@@ -369,6 +382,7 @@ async def legacy_upload_submission_photo(
             },
         )
 
+    # ✅ Legacy: use start_seq as seq_no
     return await _handle_photo_upload_and_save(
         db=db,
         student_id=student.id,
@@ -378,4 +392,5 @@ async def legacy_upload_submission_photo(
         lng=float(lng_val),
         sha256=sha,
         image=upload,
+        seq_no=int(start_seq),
     )

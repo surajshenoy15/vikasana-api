@@ -9,6 +9,8 @@ from app.models.activity_type import ActivityType, ActivityTypeStatus
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_photo import ActivityPhoto
 from app.models.student_activity_stats import StudentActivityStats
+from app.controllers.activity_photos_controller import add_activity_photo
+from app.schemas.activity import PhotoOut
 
 MIN_PHOTOS = 3
 MAX_PHOTOS = 5
@@ -110,12 +112,25 @@ async def add_photo_to_session(
     db: AsyncSession,
     student_id: int,
     session_id: int,
+    seq_no: int,                 # ✅ NEW
     image_url: str,
     captured_at: datetime,
     lat: float,
     lng: float,
-    sha256: str | None,
-):
+    sha256: str | None = None,
+) -> PhotoOut:
+    row = await add_activity_photo(
+        db=db,
+        session_id=session_id,
+        student_id=student_id,
+        seq_no=seq_no,            # ✅ NEW
+        image_url=image_url,
+        lat=lat,
+        lng=lng,
+        captured_at=captured_at,
+        sha256=sha256,
+    )
+    return row
     # Secure ownership check
     res = await db.execute(
         select(ActivitySession).where(

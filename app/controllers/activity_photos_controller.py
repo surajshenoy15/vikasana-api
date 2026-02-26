@@ -1,5 +1,4 @@
 # app/controllers/activity_photos_controller.py
-
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy import select, and_
@@ -33,14 +32,16 @@ async def add_activity_photo(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found for this student")
 
-    # 2) Ensure session is in progress / draft (adjust allowed statuses)
-    # Your sessions use: DRAFT, SUBMITTED, APPROVED, FLAGGED, REJECTED, EXPIRED
+    # 2) Ensure session is DRAFT
     if hasattr(session, "status"):
         status = (session.status or "").upper()
         if status != "DRAFT":
-            raise HTTPException(status_code=400, detail=f"Cannot upload photos when session status is {status}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot upload photos when session status is {status}",
+            )
 
-    # 3) Validate seq_no against event.required_photos (if session has event_id)
+    # 3) Validate seq_no vs event.required_photos
     if getattr(session, "event_id", None):
         rq = await db.execute(select(Event.required_photos).where(Event.id == session.event_id))
         required_photos = rq.scalar_one_or_none()
@@ -63,17 +64,16 @@ async def add_activity_photo(
     if captured_at is None:
         captured_at = datetime.now(timezone.utc)
 
-    # 5) Compute duplicate (do NOT store in DB unless you add a column)
+    # 5) Duplicate detection only if column exists
     is_duplicate = False
-    if sha256:
-        # duplicate within same session (recommended)
+    has_sha_col = hasattr(ActivityPhoto, "sha256")
+    if sha256 and has_sha_col:
         q = select(ActivityPhoto.id).where(
             and_(
                 ActivityPhoto.session_id == session_id,
                 ActivityPhoto.sha256 == sha256,
             )
         )
-        # if updating, ignore self
         if existing is not None:
             q = q.where(ActivityPhoto.id != existing.id)
 
@@ -87,13 +87,12 @@ async def add_activity_photo(
             existing.lng = float(lng)
             existing.captured_at = captured_at
             existing.student_id = student_id
-            if sha256 is not None and hasattr(existing, "sha256"):
+            if sha256 is not None and has_sha_col:
                 existing.sha256 = sha256
 
             await db.commit()
             await db.refresh(existing)
 
-            # return dict including is_duplicate
             return {
                 "id": existing.id,
                 "image_url": existing.image_url,
@@ -104,7 +103,7 @@ async def add_activity_photo(
                 "is_duplicate": bool(is_duplicate),
             }
 
-        photo = ActivityPhoto(
+        payload = dict(
             session_id=session_id,
             student_id=student_id,
             seq_no=seq_no,
@@ -112,8 +111,11 @@ async def add_activity_photo(
             lat=float(lat),
             lng=float(lng),
             captured_at=captured_at,
-            **({"sha256": sha256} if sha256 is not None else {}),
         )
+        if sha256 is not None and has_sha_col:
+            payload["sha256"] = sha256
+
+        photo = ActivityPhoto(**payload)
         db.add(photo)
         await db.commit()
         await db.refresh(photo)
