@@ -20,6 +20,10 @@ async def add_activity_photo(
     lng: float,
     captured_at: datetime | None = None,
     sha256: str | None = None,
+    # ✅ new
+    distance_m: float | None = None,
+    is_in_geofence: bool = True,
+    geo_flag_reason: str | None = None,
 ):
     # 1) Validate session belongs to student
     res = await db.execute(
@@ -64,7 +68,7 @@ async def add_activity_photo(
     if captured_at is None:
         captured_at = datetime.now(timezone.utc)
 
-    # 5) Duplicate detection
+    # 5) Duplicate detection (sha256)
     is_duplicate = False
     has_sha_col = hasattr(ActivityPhoto, "sha256")
     if sha256 and has_sha_col:
@@ -82,12 +86,18 @@ async def add_activity_photo(
     try:
         if existing:
             existing.image_url = image_url
-            existing.lat = float(lat)
-            existing.lng = float(lng)
+            existing.lat = float(lat) if lat is not None else None
+            existing.lng = float(lng) if lng is not None else None
             existing.captured_at = captured_at
             existing.student_id = student_id
             if sha256 is not None and has_sha_col:
                 existing.sha256 = sha256
+
+            # ✅ save geofence fields
+            existing.distance_m = distance_m
+            existing.is_in_geofence = bool(is_in_geofence)
+            existing.geo_flag_reason = geo_flag_reason
+
             await db.commit()
             await db.refresh(existing)
             photo = existing
@@ -97,9 +107,12 @@ async def add_activity_photo(
                 student_id=student_id,
                 seq_no=seq_no,
                 image_url=image_url,
-                lat=float(lat),
-                lng=float(lng),
+                lat=float(lat) if lat is not None else None,
+                lng=float(lng) if lng is not None else None,
                 captured_at=captured_at,
+                distance_m=distance_m,
+                is_in_geofence=bool(is_in_geofence),
+                geo_flag_reason=geo_flag_reason,
             )
             if sha256 is not None and has_sha_col:
                 payload["sha256"] = sha256
@@ -115,6 +128,9 @@ async def add_activity_photo(
             "captured_at": photo.captured_at,
             "lat": photo.lat,
             "lng": photo.lng,
+            "distance_m": getattr(photo, "distance_m", None),
+            "is_in_geofence": bool(getattr(photo, "is_in_geofence", True)),
+            "geo_flag_reason": getattr(photo, "geo_flag_reason", None),
             "is_duplicate": bool(is_duplicate),
         }
 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, func
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, func, Float, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 import enum
@@ -29,6 +29,12 @@ class ActivityType(Base):
     hours_per_unit = Column(Integer, nullable=False, default=20)
     points_per_unit = Column(Integer, nullable=False, default=5)
     max_points = Column(Integer, nullable=False, default=20)
+
+    # ✅ Geofence (admin-configured)
+    maps_url = Column(Text, nullable=True)
+    target_lat = Column(Float, nullable=True)
+    target_lng = Column(Float, nullable=True)
+    radius_m = Column(Integer, nullable=False, default=500)  # default 500 meters
 
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -1,5 +1,6 @@
 # app/controllers/activity_controller.py
 import secrets
+import math
 from datetime import datetime, time, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -15,6 +16,7 @@ from app.schemas.activity import PhotoOut
 
 MIN_PHOTOS = 3
 MAX_PHOTOS = 5
+DEFAULT_RADIUS_M = 500
 
 
 # ─────────────────────────────────────────────
@@ -32,6 +34,21 @@ def _calc_duration_hours(photo_times: list[datetime]) -> float:
     end = max(photo_times)
     seconds = (end - start).total_seconds()
     return max(0.0, seconds / 3600.0)
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """
+    Great-circle distance in meters between two lat/lng points.
+    """
+    R = 6371000.0  # meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
 
 # ─────────────────────────────────────────────
@@ -106,7 +123,7 @@ async def create_session(
 
 
 # ─────────────────────────────────────────────
-# List Sessions (FIXED: was missing and caused ImportError)
+# List Sessions
 # ─────────────────────────────────────────────
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
@@ -124,7 +141,7 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
 
 
 # ─────────────────────────────────────────────
-# Add Photo
+# Add Photo (with 500m geofence support)
 # ─────────────────────────────────────────────
 
 async def add_photo_to_session(
@@ -172,7 +189,28 @@ async def add_photo_to_session(
     if existing_count >= MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # 6) Save via photo controller (upsert/duplicate logic stays there)
+    # 6) Geofence evaluation based on ActivityType target_lat/target_lng (+ radius_m)
+    at_res = await db.execute(
+        select(ActivityType).where(ActivityType.id == session.activity_type_id)
+    )
+    at = at_res.scalar_one_or_none()
+
+    target_lat = getattr(at, "target_lat", None) if at else None
+    target_lng = getattr(at, "target_lng", None) if at else None
+    radius_m = int(getattr(at, "radius_m", DEFAULT_RADIUS_M) or DEFAULT_RADIUS_M) if at else DEFAULT_RADIUS_M
+
+    distance_m = None
+    is_in_geofence = True
+    geo_flag_reason = None
+
+    # If admin configured target location AND we have lat/lng, compute distance
+    if target_lat is not None and target_lng is not None and lat is not None and lng is not None:
+        distance_m = _haversine_m(float(lat), float(lng), float(target_lat), float(target_lng))
+        if distance_m > radius_m:
+            is_in_geofence = False
+            geo_flag_reason = f"outside_geofence>{radius_m}m"
+
+    # 7) Save via photo controller (stores geo verdict too)
     row = await add_activity_photo(
         db=db,
         session_id=session_id,
@@ -183,12 +221,16 @@ async def add_photo_to_session(
         lng=lng,
         captured_at=captured_at,
         sha256=sha256,
+        # ✅ new fields (make sure add_activity_photo accepts these)
+        distance_m=distance_m,
+        is_in_geofence=is_in_geofence,
+        geo_flag_reason=geo_flag_reason,
     )
     return row
 
 
 # ─────────────────────────────────────────────
-# Submit Session
+# Submit Session (counts ONLY in-geofence photos)
 # ─────────────────────────────────────────────
 
 async def submit_session(db: AsyncSession, student_id: int, session_id: int):
@@ -211,19 +253,33 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
+    # ✅ Only consider in-geofence photos as valid
     photos_res = await db.execute(
-        select(ActivityPhoto).where(ActivityPhoto.session_id == session_id)
+        select(ActivityPhoto).where(
+            ActivityPhoto.session_id == session_id,
+            ActivityPhoto.is_in_geofence == True,
+        )
     )
     photos = photos_res.scalars().all()
 
     if len(photos) < MIN_PHOTOS:
-        raise HTTPException(status_code=400, detail=f"Minimum {MIN_PHOTOS} photos required")
+        # If you want this to always say "500m", keep it fixed.
+        # If you want dynamic radius, you can load ActivityType like in add_photo_to_session.
+        raise HTTPException(
+            status_code=400,
+            detail=f"Minimum {MIN_PHOTOS} photos required within {DEFAULT_RADIUS_M}m radius",
+        )
 
     photo_times: list[datetime] = []
     suspicious = False
     reasons: list[str] = []
 
     for ph in photos:
+        if ph.captured_at is None:
+            suspicious = True
+            reasons.append("photo_missing_timestamp")
+            continue
+
         photo_times.append(ph.captured_at)
 
         if ph.captured_at.date() != session.started_at.date():
@@ -262,7 +318,7 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
 
 
 # ─────────────────────────────────────────────
-# Session Detail
+# Session Detail (includes geo info + target location)
 # ─────────────────────────────────────────────
 
 async def get_student_session_detail(db: AsyncSession, student_id: int, session_id: int):
@@ -278,6 +334,10 @@ async def get_student_session_detail(db: AsyncSession, student_id: int, session_
     session = res.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    # Load ActivityType to show target location details
+    at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
+    at = at_res.scalar_one_or_none()
 
     photos = list(session.photos or [])
 
@@ -296,6 +356,9 @@ async def get_student_session_detail(db: AsyncSession, student_id: int, session_
                 "captured_at": ph.captured_at,
                 "lat": ph.lat,
                 "lng": ph.lng,
+                "distance_m": getattr(ph, "distance_m", None),
+                "is_in_geofence": bool(getattr(ph, "is_in_geofence", True)),
+                "geo_flag_reason": getattr(ph, "geo_flag_reason", None),
                 "is_duplicate": bool(getattr(ph, "sha256", None) and sha_counts.get(ph.sha256, 0) > 1),
             }
         )
@@ -311,5 +374,12 @@ async def get_student_session_detail(db: AsyncSession, student_id: int, session_
         "status": session.status.value if hasattr(session.status, "value") else str(session.status),
         "duration_hours": session.duration_hours,
         "flag_reason": session.flag_reason,
+        # ✅ show target config (admin-added)
+        "target_location": {
+            "maps_url": getattr(at, "maps_url", None) if at else None,
+            "target_lat": getattr(at, "target_lat", None) if at else None,
+            "target_lng": getattr(at, "target_lng", None) if at else None,
+            "radius_m": int(getattr(at, "radius_m", DEFAULT_RADIUS_M) or DEFAULT_RADIUS_M) if at else DEFAULT_RADIUS_M,
+        },
         "photos": photos_out,
     }

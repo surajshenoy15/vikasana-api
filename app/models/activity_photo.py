@@ -8,6 +8,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     Index,
+    Boolean,
 )
 from sqlalchemy.orm import relationship
 
@@ -44,6 +45,11 @@ class ActivityPhoto(Base):
 
     sha256 = Column(Text, nullable=True)
 
+    # ✅ Geofence evaluation (system-calculated)
+    distance_m = Column(Float, nullable=True)
+    is_in_geofence = Column(Boolean, nullable=False, default=True)
+    geo_flag_reason = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
@@ -51,7 +57,6 @@ class ActivityPhoto(Base):
         Index("ix_activity_photos_student_session", "student_id", "session_id"),
     )
 
-    # Relationships (string refs to avoid circular imports)
     session = relationship("ActivitySession", back_populates="photos")
     student = relationship("Student", back_populates="activity_photos")
 
