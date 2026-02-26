@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from pydantic import BaseModel, Field
 from fastapi import (
     APIRouter,
     Depends,
@@ -42,6 +43,7 @@ from app.controllers.activity_controller import (
 from app.core.activity_storage import upload_activity_image
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
+from app.models.activity_type import ActivityType  # ✅ REQUIRED for admin update
 from app.models.events import Event  # ✅ Event model
 
 
@@ -52,7 +54,6 @@ from app.models.events import Event  # ✅ Event model
 #   app.include_router(admin_router, prefix="/api")
 #   app.include_router(legacy_router, prefix="/api")
 
-# ✅ YOU WERE MISSING THIS ROUTER DEFINITION
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
 admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
 legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
@@ -192,6 +193,7 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
+
 # ─────────────────────────────────────────────────────────────
 # Student - Activity
 # ─────────────────────────────────────────────────────────────
@@ -232,7 +234,6 @@ async def create_activity_session(
     }
 
 
-# ✅ NEW: Create session from Event (no activity_type fields required from frontend)
 @router.post("/sessions/from-event")
 async def create_activity_session_from_event(
     event_id: int = Query(..., ge=1),
@@ -370,6 +371,35 @@ async def admin_list_types(
     admin=Depends(get_current_admin),
 ):
     return await list_activity_types(db, include_pending=include_pending)
+
+
+class AdminUpdateActivityTypeGeoIn(BaseModel):
+    maps_url: Optional[str] = None
+    target_lat: Optional[float] = None
+    target_lng: Optional[float] = None
+    radius_m: Optional[int] = Field(default=500, ge=50, le=5000)
+
+
+@admin_router.put("/types/{type_id}", response_model=ActivityTypeOut)
+async def admin_update_activity_type_geo(
+    type_id: int,
+    payload: AdminUpdateActivityTypeGeoIn,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    res = await db.execute(select(ActivityType).where(ActivityType.id == type_id))
+    at = res.scalar_one_or_none()
+    if not at:
+        raise HTTPException(status_code=404, detail="Activity type not found")
+
+    at.maps_url = payload.maps_url
+    at.target_lat = payload.target_lat
+    at.target_lng = payload.target_lng
+    at.radius_m = int(payload.radius_m or 500)
+
+    await db.commit()
+    await db.refresh(at)
+    return at
 
 
 # ─────────────────────────────────────────────────────────────
