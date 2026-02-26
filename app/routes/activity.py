@@ -1,15 +1,8 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
-from fastapi import Form
-
-
-
-
-from app.schemas.activity import PhotoOut
-
 
 from app.schemas.activity import (
     ActivityTypeOut,
@@ -18,7 +11,10 @@ from app.schemas.activity import (
     SessionOut,
     PhotoOut,
     SubmitSessionOut,
+    SessionListItemOut,
+    SessionDetailOut,
 )
+
 from app.controllers.activity_controller import (
     list_activity_types,
     request_new_activity_type,
@@ -31,9 +27,126 @@ from app.controllers.activity_controller import (
 
 from app.core.activity_storage import upload_activity_image
 
+
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
+admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
+legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
 
 
+# ─────────────────────────────────────────────────────────────
+# Datetime parsing helper (FIX)
+# ─────────────────────────────────────────────────────────────
+def _normalize_ddmmyyyy_date(date_part: str) -> str:
+    # "26/2/2026" -> "26/02/2026"
+    # "6/11/2026" -> "06/11/2026"
+    parts = date_part.strip().split("/")
+    if len(parts) != 3:
+        return date_part.strip()
+    d, m, y = parts
+    return f"{d.zfill(2)}/{m.zfill(2)}/{y}"
+
+
+def parse_captured_at(meta_captured_at: str):
+    """
+    Accepts:
+      - ISO: 2026-02-26T11:39:49+05:30 / 2026-02-26T06:09:49Z
+      - DD/MM/YYYY, hh:mm:ss am/pm  (example: 26/2/2026, 11:39:49 am)
+      - DD/MM/YYYY hh:mm:ss am/pm
+      - DD-MM-YYYY, hh:mm:ss am/pm (common variant)
+    If timezone missing, assumes Asia/Kolkata.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    s = (meta_captured_at or "").strip()
+    if not s:
+        raise HTTPException(status_code=422, detail="meta_captured_at is required")
+
+    # 1) Try ISO (supports Z)
+    try:
+        iso = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso)
+        # If ISO but naive, attach Kolkata
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        return dt
+    except ValueError:
+        pass
+
+    # 2) Try DD/MM/YYYY formats (your current frontend)
+    # Normalize date part to 2-digit day/month.
+    # Example input: "26/2/2026, 11:39:49 am"
+    cleaned = s
+    cleaned = cleaned.replace(" AM", " am").replace(" PM", " pm")
+    cleaned = cleaned.replace(" a.m.", " am").replace(" p.m.", " pm")
+    cleaned = cleaned.strip()
+
+    # Split date/time on comma if present
+    if "," in cleaned:
+        date_part, time_part = [x.strip() for x in cleaned.split(",", 1)]
+    else:
+        # maybe "26/2/2026 11:39:49 am"
+        parts = cleaned.split()
+        if len(parts) >= 2:
+            date_part = parts[0].strip()
+            time_part = " ".join(parts[1:]).strip()
+        else:
+            date_part, time_part = cleaned, ""
+
+    date_part_norm = _normalize_ddmmyyyy_date(date_part)
+
+    candidates = [
+        f"{date_part_norm}, {time_part}".strip(),
+        f"{date_part_norm} {time_part}".strip(),
+        cleaned,
+    ]
+
+    # Common formats to try
+    fmts = [
+        "%d/%m/%Y, %I:%M:%S %p",
+        "%d/%m/%Y %I:%M:%S %p",
+        "%d/%m/%Y, %H:%M:%S",
+        "%d/%m/%Y %H:%M:%S",
+        "%d-%m-%Y, %I:%M:%S %p",
+        "%d-%m-%Y %I:%M:%S %p",
+        "%d-%m-%Y, %H:%M:%S",
+        "%d-%m-%Y %H:%M:%S",
+    ]
+
+    last_err = None
+    for cand in candidates:
+        if not cand:
+            continue
+        # Make AM/PM consistent for strptime
+        cand2 = cand.replace(" am", " AM").replace(" pm", " PM")
+        for fmt in fmts:
+            try:
+                dt = datetime.strptime(cand2, fmt)
+                # Attach timezone since this format has no offset
+                dt = dt.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                return dt
+            except ValueError as e:
+                last_err = e
+
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "Invalid meta_captured_at format",
+            "received": s,
+            "expected_examples": [
+                "2026-02-26T11:39:49+05:30",
+                "2026-02-26T06:09:49Z",
+                "26/2/2026, 11:39:49 am",
+                "26/02/2026 11:39:49 AM",
+            ],
+            "error": str(last_err) if last_err else "unparseable",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# Student - Activity
+# ─────────────────────────────────────────────────────────────
 @router.get("/types", response_model=list[ActivityTypeOut])
 async def get_types(db: AsyncSession = Depends(get_db)):
     return await list_activity_types(db, include_pending=False)
@@ -88,15 +201,8 @@ async def _handle_photo_upload_and_save(
         session_id=session_id,
     )
 
-    # 3) Parse captured_at (accept Z)
-    from datetime import datetime
-
-    s = (meta_captured_at or "").strip()
-    if not s:
-        raise HTTPException(status_code=422, detail="meta_captured_at is required")
-
-    s = s.replace("Z", "+00:00")
-    captured_at = datetime.fromisoformat(s)
+    # 3) Parse captured_at (flexible)
+    captured_at = parse_captured_at(meta_captured_at)
 
     # 4) Save photo record (upsert handled in controller)
     return await add_photo_to_session(
@@ -111,11 +217,10 @@ async def _handle_photo_upload_and_save(
     )
 
 
-# ✅ Primary endpoint (your current one)
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
-    meta_captured_at: str = Query(..., description="ISO datetime with timezone recommended"),
+    meta_captured_at: str = Query(..., description="ISO datetime preferred; also accepts DD/MM/YYYY, hh:mm:ss am/pm"),
     lat: float = Query(...),
     lng: float = Query(...),
     sha256: str | None = Query(None),
@@ -150,22 +255,6 @@ async def submit_activity(
     }
 
 
-# --- Admin routes (minimal) ---
-admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
-
-
-@admin_router.get("/types", response_model=list[ActivityTypeOut])
-async def admin_list_types(
-    include_pending: bool = True,
-    db: AsyncSession = Depends(get_db),
-    admin=Depends(get_current_admin),
-):
-    return await list_activity_types(db, include_pending=include_pending)
-
-
-from app.schemas.activity import SessionListItemOut, SessionDetailOut
-
-
 @router.get("/sessions", response_model=list[SessionListItemOut])
 async def my_sessions(
     db: AsyncSession = Depends(get_db),
@@ -183,58 +272,28 @@ async def session_detail(
     return await get_student_session_detail(db, student.id, session_id)
 
 
-# ============================================================
-# ✅ COMPATIBILITY ROUTER (ALIAS) FOR YOUR FRONTEND CALL
+# ─────────────────────────────────────────────────────────────
+# Admin - Activity (minimal)
+# ─────────────────────────────────────────────────────────────
+@admin_router.get("/types", response_model=list[ActivityTypeOut])
+async def admin_list_types(
+    include_pending: bool = True,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    return await list_activity_types(db, include_pending=include_pending)
+
+
+# ─────────────────────────────────────────────────────────────
+# Legacy compatibility route
 # Frontend expects:
 #   POST /api/student/submissions/{id}/photos?start_seq=1
-# We'll provide:
-#   POST /api/student/submissions/{submission_id}/photos
-# that forwards to the same logic.
-# ============================================================
-
-legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
-
-
-@legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
-async def legacy_upload_submission_photo(
-    submission_id: int,
-    start_seq: int = Query(1, ge=1),  # accepted but not required by backend
-    meta_captured_at: str = Query(..., description="ISO datetime"),
-    lat: float = Query(...),
-    lng: float = Query(...),
-    sha256: str | None = Query(None),
-    image: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
-):
-    # NOTE: start_seq is ignored unless you want to map it to seq_no.
-    # Your controller uses UNIQUE(session_id, seq_no). If you want seq_no support,
-    # update add_photo_to_session to accept seq_no.
-    return await _handle_photo_upload_and_save(
-        db=db,
-        student_id=student.id,
-        session_id=submission_id,
-        meta_captured_at=meta_captured_at,
-        lat=lat,
-        lng=lng,
-        sha256=sha256,
-        image=image,
-    )
-
-# ------------------------------------------------------------
-# Legacy routes (to support older frontend URLs)
-# ------------------------------------------------------------
-
-
-
-# make sure legacy_router exists
-legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
-
+# ─────────────────────────────────────────────────────────────
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
 async def legacy_upload_submission_photo(
     submission_id: int,
 
-    # frontend sends this
+    # frontend sends this (accepted, ignored)
     start_seq: int = Query(1, ge=1),
 
     # accept multiple param names (query)
@@ -267,20 +326,22 @@ async def legacy_upload_submission_photo(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # pick captured_at
     cap = meta_captured_at or captured_at or meta_captured_at_f or captured_at_f
 
-    # pick lat/lng (support alt names)
-    lat_val = lat if lat is not None else (latitude if latitude is not None else (lat_f if lat_f is not None else latitude_f))
-    lng_val = lng if lng is not None else (longitude if longitude is not None else (lng_f if lng_f is not None else longitude_f))
+    lat_val = (
+        lat if lat is not None else
+        (latitude if latitude is not None else
+         (lat_f if lat_f is not None else latitude_f))
+    )
+    lng_val = (
+        lng if lng is not None else
+        (longitude if longitude is not None else
+         (lng_f if lng_f is not None else longitude_f))
+    )
 
-    # pick sha
     sha = sha256 or sha256_f
-
-    # pick file
     upload = image or file or photo
 
-    # return extremely clear errors
     if upload is None:
         raise HTTPException(
             status_code=422,
@@ -308,15 +369,13 @@ async def legacy_upload_submission_photo(
             },
         )
 
-    # ✅ reuse your existing /student/activity/sessions/{id}/photos handler
-    from app.routes.activity import upload_activity_photo  # local import avoids circular
-    return await upload_activity_photo(
+    return await _handle_photo_upload_and_save(
+        db=db,
+        student_id=student.id,
         session_id=submission_id,
         meta_captured_at=cap,
         lat=float(lat_val),
         lng=float(lng_val),
         sha256=sha,
         image=upload,
-        db=db,
-        student=student,
     )
