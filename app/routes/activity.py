@@ -182,7 +182,7 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ✅ only DRAFT sessions can accept uploads
+    # ✅ only DRAFT can upload
     if session.status != ActivitySessionStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Cannot upload photos after submission")
 
