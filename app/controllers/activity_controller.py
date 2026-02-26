@@ -100,18 +100,26 @@ async def add_photo_to_session(
         raise HTTPException(status_code=400, detail="Session expired")
 
     # enforce 3–5 photos overall
-    photo_count = await db.execute(select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id))
+    photo_count = await db.execute(
+        select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
+    )
     count = int(photo_count.scalar() or 0)
     if count >= MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # duplication check by sha256 (basic)
+    # duplication check by sha256 (within same session)
     is_dup = False
     if sha256:
-        dup = await db.execute(select(ActivityPhoto).where(ActivityPhoto.sha256 == sha256))
-        if dup.scalar_one_or_none():
+        dup = await db.execute(
+            select(ActivityPhoto.id).where(
+                ActivityPhoto.session_id == session_id,
+                ActivityPhoto.sha256 == sha256,
+            )
+        )
+        if dup.scalar_one_or_none() is not None:
             is_dup = True
 
+    # create photo row (NO is_duplicate column in DB)
     p = ActivityPhoto(
         session_id=session_id,
         image_url=image_url,
@@ -119,12 +127,21 @@ async def add_photo_to_session(
         lat=lat,
         lng=lng,
         sha256=sha256,
-        is_duplicate=is_dup,
     )
     db.add(p)
     await db.commit()
     await db.refresh(p)
-    return p
+
+    # return response shape including is_duplicate (computed)
+    return {
+        "id": p.id,
+        "image_url": p.image_url,
+        "sha256": p.sha256,
+        "captured_at": p.captured_at,
+        "lat": p.lat,
+        "lng": p.lng,
+        "is_duplicate": bool(is_dup),
+    }
 
 async def submit_session(db: AsyncSession, student_id: int, session_id: int):
     res = await db.execute(
@@ -168,9 +185,18 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
             suspicious = True
             reasons.append("photo_outside_time_window")
 
-        if ph.is_duplicate:
-            suspicious = True
-            reasons.append("duplicate_photo_detected")
+                # duplicate check (within same session) based on sha256
+        if ph.sha256:
+            dup2 = await db.execute(
+                select(ActivityPhoto.id).where(
+                    ActivityPhoto.session_id == session_id,
+                    ActivityPhoto.sha256 == ph.sha256,
+                    ActivityPhoto.id != ph.id,
+                )
+            )
+            if dup2.scalar_one_or_none() is not None:
+                suspicious = True
+                reasons.append("duplicate_photo_detected")
 
     duration_hours = _calc_duration_hours(photo_times)
 
