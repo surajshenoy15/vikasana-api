@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime 
 from datetime import date, time
+from typing import List
 
 
 class EventCreateIn(BaseModel):
@@ -81,3 +82,8 @@ class AdminSubmissionOut(BaseModel):
 
 class RejectIn(BaseModel):
     reason: str
+
+
+class PhotosUploadOut(BaseModel):
+    session_id: int
+    photos: List[PhotoOut]

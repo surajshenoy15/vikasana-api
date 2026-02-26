@@ -8,6 +8,8 @@ from app.core.dependencies import get_current_student, get_current_admin
 from app.core.activity_storage import upload_activity_image
 from app.schemas.events import ThumbnailUploadUrlIn, ThumbnailUploadUrlOut
 from app.controllers.events_controller import get_event_thumbnail_upload_url
+from sqlalchemy import select
+from app.models.activity_session import ActivitySession
 
 from app.schemas.events import (
     EventCreateIn, EventOut,
@@ -88,7 +90,10 @@ async def register_event(
 
 
 # ✅ MULTI UPLOAD
-@router.post("/student/submissions/{submission_id}/photos", response_model=list[PhotoOut])
+@router.post(
+    "/student/submissions/{submission_id}/photos",
+    response_model=PhotosUploadOut,
+)
 async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
@@ -96,7 +101,17 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    results = []
+    # ✅ Validate session/submission exists & belongs to student
+    session_stmt = select(ActivitySession).where(
+        ActivitySession.id == submission_id,
+        ActivitySession.student_id == student.id,
+    )
+    session_res = await db.execute(session_stmt)
+    session = session_res.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Submission/Session not found for this student")
+
+    results: List[PhotoOut] = []
     seq_no = start_seq
 
     for img in images:
@@ -104,17 +119,18 @@ async def upload_photos(
         if not file_bytes:
             continue
 
+        # ✅ Store in MinIO (keep session_id = ActivitySession.id)
         image_url = await upload_activity_image(
             file_bytes=file_bytes,
             content_type=img.content_type or "application/octet-stream",
             filename=img.filename or f"photo_{seq_no}.jpg",
             student_id=student.id,
-            session_id=submission_id,
+            session_id=session.id,  # ✅ real ActivitySession id
         )
 
         photo = await add_photo(
             db=db,
-            submission_id=submission_id,
+            submission_id=session.id,  # ✅ keep consistent
             student_id=student.id,
             seq_no=seq_no,
             image_url=image_url,
@@ -123,8 +139,10 @@ async def upload_photos(
         results.append(photo)
         seq_no += 1
 
-    return results
-
+    return {
+        "session_id": session.id,  # ✅ frontend will use this for /face/verify-session
+        "photos": results,
+    }
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
 async def submit_event(
