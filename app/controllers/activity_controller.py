@@ -112,26 +112,14 @@ async def add_photo_to_session(
     db: AsyncSession,
     student_id: int,
     session_id: int,
-    seq_no: int,                 # ✅ NEW
+    seq_no: int,
     image_url: str,
     captured_at: datetime,
     lat: float,
     lng: float,
     sha256: str | None = None,
 ) -> PhotoOut:
-    row = await add_activity_photo(
-        db=db,
-        session_id=session_id,
-        student_id=student_id,
-        seq_no=seq_no,            # ✅ NEW
-        image_url=image_url,
-        lat=lat,
-        lng=lng,
-        captured_at=captured_at,
-        sha256=sha256,
-    )
-    return row
-    # Secure ownership check
+    # 1) Verify session exists + belongs to student
     res = await db.execute(
         select(ActivitySession).where(
             ActivitySession.id == session_id,
@@ -142,61 +130,42 @@ async def add_photo_to_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    # 2) Ensure still draft
     if session.status != ActivitySessionStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Cannot add photo after submission")
 
+    # 3) Ensure not expired
     now = datetime.now(timezone.utc)
     if now > session.expires_at:
         session.status = ActivitySessionStatus.EXPIRED
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
-    # Safe seq_no using MAX
-    max_seq_res = await db.execute(
-        select(func.coalesce(func.max(ActivityPhoto.seq_no), 0)).where(
-            ActivityPhoto.session_id == session_id
-        )
-    )
-    next_seq = int(max_seq_res.scalar() or 0) + 1
+    # 4) Enforce seq range
+    if seq_no < 1 or seq_no > MAX_PHOTOS:
+        raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {MAX_PHOTOS}")
 
-    if next_seq > MAX_PHOTOS:
+    # 5) Optional: prevent exceeding max photos count
+    count_res = await db.execute(
+        select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
+    )
+    existing_count = int(count_res.scalar() or 0)
+    if existing_count >= MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # Duplicate check
-    is_dup = False
-    if sha256:
-        dup = await db.execute(
-            select(ActivityPhoto.id).where(
-                ActivityPhoto.session_id == session_id,
-                ActivityPhoto.sha256 == sha256,
-            )
-        )
-        is_dup = dup.scalar_one_or_none() is not None
-
-    photo = ActivityPhoto(
+    # 6) Save via photo controller (upsert/duplicate logic stays there)
+    row = await add_activity_photo(
+        db=db,
         session_id=session_id,
         student_id=student_id,
-        seq_no=next_seq,
+        seq_no=seq_no,
         image_url=image_url,
-        lat=float(lat),
-        lng=float(lng),
+        lat=lat,
+        lng=lng,
         captured_at=captured_at,
         sha256=sha256,
     )
-
-    db.add(photo)
-    await db.commit()
-    await db.refresh(photo)
-
-    return {
-        "id": photo.id,
-        "image_url": photo.image_url,
-        "sha256": photo.sha256,
-        "captured_at": photo.captured_at,
-        "lat": photo.lat,
-        "lng": photo.lng,
-        "is_duplicate": bool(is_dup),
-    }
+    return row
 
 
 # ─────────────────────────────────────────────
