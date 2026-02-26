@@ -10,7 +10,7 @@ class AdminPhotoOut(BaseModel):
     session_id: int
     student_id: int
     image_url: str
-    captured_at: datetime
+    captured_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -22,10 +22,15 @@ class AdminFaceCheckOut(BaseModel):
     cosine_score: Optional[float] = None
     l2_score: Optional[float] = None
     total_faces: Optional[int] = None
+
     raw_image_url: str
     processed_object: Optional[str] = None
     reason: Optional[str] = None
     created_at: datetime
+
+    # ✅ NEW (optional if you want to show in detail page easily)
+    processed_url: Optional[str] = None
+    raw_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -47,6 +52,10 @@ class AdminSessionListItemOut(BaseModel):
     latest_face_reason: Optional[str] = None
     latest_face_score: Optional[float] = None
 
+    # ✅ NEW: Presigned URLs for UI thumbnails
+    latest_face_processed_url: Optional[str] = None
+    latest_face_raw_url: Optional[str] = None
+
     class Config:
         from_attributes = True
 
@@ -66,6 +75,10 @@ class AdminSessionDetailOut(BaseModel):
 
     photos: List[AdminPhotoOut]
     latest_face_check: Optional[AdminFaceCheckOut] = None
+
+    # ✅ NEW: Presigned URLs for UI
+    latest_face_processed_url: Optional[str] = None
+    latest_face_raw_url: Optional[str] = None
 
     class Config:
         from_attributes = True
