@@ -6,6 +6,11 @@ from app.core.dependencies import get_current_student, get_current_admin
 from fastapi import Form
 
 
+
+
+from app.schemas.activity import PhotoOut
+
+
 from app.schemas.activity import (
     ActivityTypeOut,
     RequestActivityTypeIn,
@@ -220,47 +225,98 @@ async def legacy_upload_submission_photo(
 # Legacy routes (to support older frontend URLs)
 # ------------------------------------------------------------
 
+
+
+# make sure legacy_router exists
+legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
+
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
 async def legacy_upload_submission_photo(
     submission_id: int,
+
+    # frontend sends this
     start_seq: int = Query(1, ge=1),
 
-    # allow either query OR form
+    # accept multiple param names (query)
     meta_captured_at: str | None = Query(None),
+    captured_at: str | None = Query(None),
+
     lat: float | None = Query(None),
     lng: float | None = Query(None),
-
-    meta_captured_at_f: str | None = Form(None),
-    lat_f: float | None = Form(None),
-    lng_f: float | None = Form(None),
+    latitude: float | None = Query(None),
+    longitude: float | None = Query(None),
 
     sha256: str | None = Query(None),
+
+    # accept multiple param names (form)
+    meta_captured_at_f: str | None = Form(None),
+    captured_at_f: str | None = Form(None),
+
+    lat_f: float | None = Form(None),
+    lng_f: float | None = Form(None),
+    latitude_f: float | None = Form(None),
+    longitude_f: float | None = Form(None),
+
     sha256_f: str | None = Form(None),
 
+    # accept multiple file field names
     image: UploadFile | None = File(None),
+    file: UploadFile | None = File(None),
+    photo: UploadFile | None = File(None),
 
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    meta_captured_at = meta_captured_at or meta_captured_at_f
-    lat = lat if lat is not None else lat_f
-    lng = lng if lng is not None else lng_f
-    sha256 = sha256 or sha256_f
+    # pick captured_at
+    cap = meta_captured_at or captured_at or meta_captured_at_f or captured_at_f
 
-    if not meta_captured_at:
-        raise HTTPException(status_code=422, detail="meta_captured_at is required (query or form)")
-    if lat is None or lng is None:
-        raise HTTPException(status_code=422, detail="lat and lng are required (query or form)")
-    if image is None:
-        raise HTTPException(status_code=422, detail="image file is required (multipart/form-data)")
+    # pick lat/lng (support alt names)
+    lat_val = lat if lat is not None else (latitude if latitude is not None else (lat_f if lat_f is not None else latitude_f))
+    lng_val = lng if lng is not None else (longitude if longitude is not None else (lng_f if lng_f is not None else longitude_f))
 
+    # pick sha
+    sha = sha256 or sha256_f
+
+    # pick file
+    upload = image or file or photo
+
+    # return extremely clear errors
+    if upload is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "image file missing. Send multipart/form-data with one of: image | file | photo",
+                "expected": {"file_field": ["image", "file", "photo"]},
+            },
+        )
+
+    if not cap:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "captured_at missing. Send one of: meta_captured_at | captured_at (query or form)",
+                "expected": {"captured_at_field": ["meta_captured_at", "captured_at"]},
+            },
+        )
+
+    if lat_val is None or lng_val is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "lat/lng missing. Send lat,lng or latitude,longitude (query or form)",
+                "received": {"lat": lat_val, "lng": lng_val},
+            },
+        )
+
+    # ✅ reuse your existing /student/activity/sessions/{id}/photos handler
+    from app.routes.activity import upload_activity_photo  # local import avoids circular
     return await upload_activity_photo(
         session_id=submission_id,
-        meta_captured_at=meta_captured_at,
-        lat=float(lat),
-        lng=float(lng),
-        sha256=sha256,
-        image=image,
+        meta_captured_at=cap,
+        lat=float(lat_val),
+        lng=float(lng_val),
+        sha256=sha,
+        image=upload,
         db=db,
         student=student,
     )
