@@ -15,22 +15,17 @@ class AdminPhotoOut(BaseModel):
     class Config:
         from_attributes = True
 
-
 class AdminFaceCheckOut(BaseModel):
     id: int
     matched: bool
     cosine_score: Optional[float] = None
     l2_score: Optional[float] = None
     total_faces: Optional[int] = None
-
     raw_image_url: str
     processed_object: Optional[str] = None
+    processed_url: Optional[str] = None   # ✅ ADD
     reason: Optional[str] = None
     created_at: datetime
-
-    # ✅ NEW (optional if you want to show in detail page easily)
-    processed_url: Optional[str] = None
-    raw_url: Optional[str] = None
 
     class Config:
         from_attributes = True
