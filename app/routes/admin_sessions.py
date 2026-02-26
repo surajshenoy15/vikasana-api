@@ -1,6 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.models.activity_session import ActivitySessionStatus
@@ -38,11 +39,14 @@ async def approve(
     s = await admin_approve_session(db=db, session_id=session_id)
     return {"id": s.id, "status": s.status}
 
+class RejectBody(BaseModel):
+    reason: str = Field(..., min_length=1)
+
 @router.post("/{session_id}/reject")
 async def reject(
     session_id: int,
-    reason: str = Query(..., min_length=1),
+    payload: RejectBody,
     db: AsyncSession = Depends(get_db),
 ):
-    s = await admin_reject_session(db=db, session_id=session_id, reason=reason)
+    s = await admin_reject_session(db=db, session_id=session_id, reason=payload.reason)
     return {"id": s.id, "status": s.status}
