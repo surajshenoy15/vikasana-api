@@ -1,9 +1,4 @@
-# =========================================================
-# app/routes/events.py  ✅ FULL UPDATED
-# - Fixes: stores into activity_photos
-# - Fixes: requires lat/lng per image (activity_photos columns are NOT NULL)
-# - Fixes: PhotoOut/PhotosUploadOut now matches ActivityPhoto
-# =========================================================
+# app/routes/events.py  ✅ UPDATED — adds PUT /admin/events/{event_id}
 from typing import List
 from datetime import datetime
 
@@ -17,6 +12,7 @@ from app.core.activity_storage import upload_activity_image
 
 from app.models.activity_session import ActivitySession
 from app.models.activity_photo import ActivityPhoto
+from app.models.events import Event
 
 from app.schemas.events import (
     EventCreateIn,
@@ -47,7 +43,9 @@ from app.controllers.events_controller import (
 router = APIRouter(tags=["Events"])
 
 
-# ---------------- ADMIN ----------------
+# ══════════════════════════════════════════════
+# ADMIN — Events CRUD
+# ══════════════════════════════════════════════
 
 @router.post("/admin/events", response_model=EventOut)
 async def admin_create_event_api(
@@ -58,7 +56,8 @@ async def admin_create_event_api(
     return await create_event(db, payload)
 
 
-# ⚠️ IMPORTANT: keep this BEFORE /admin/events/{event_id}
+# ⚠️ Keep thumbnail-upload-url BEFORE /{event_id} so FastAPI doesn't
+# treat "thumbnail-upload-url" as an integer path param.
 @router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
 async def admin_event_thumbnail_upload_url(
     payload: ThumbnailUploadUrlIn,
@@ -72,6 +71,44 @@ async def admin_event_thumbnail_upload_url(
     )
 
 
+# ✅ NEW: Full event edit
+@router.put("/admin/events/{event_id}", response_model=EventOut)
+async def admin_update_event_api(
+    event_id: int,
+    payload: EventCreateIn,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    Update any field of an existing event.
+    Uses the same EventCreateIn schema as creation so all fields are editable:
+    title, description, event_date, event_time, venue_name, venue_maps_url,
+    required_photos, activity_list, thumbnail_url.
+    """
+    res = await db.execute(select(Event).where(Event.id == event_id))
+    ev = res.scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # Apply all fields from payload
+    ev.title = payload.title.strip()
+    ev.description = (payload.description or "").strip() or None
+
+    # Support both field name variants the schema might use
+    ev.event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    ev.event_time = getattr(payload, "event_time", None) or getattr(payload, "time", None)
+
+    ev.venue_name = (payload.venue_name or "").strip() or None
+    ev.venue_maps_url = (payload.venue_maps_url or "").strip() or None
+    ev.required_photos = int(payload.required_photos or 3)
+    ev.activity_list = payload.activity_list or []
+    ev.thumbnail_url = payload.thumbnail_url or None
+
+    await db.commit()
+    await db.refresh(ev)
+    return ev
+
+
 @router.delete("/admin/events/{event_id}", status_code=204)
 async def admin_delete_event_api(
     event_id: int,
@@ -81,7 +118,9 @@ async def admin_delete_event_api(
     await delete_event(db, event_id)
 
 
-# ---------------- STUDENT ----------------
+# ══════════════════════════════════════════════
+# STUDENT — Events
+# ══════════════════════════════════════════════
 
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
@@ -100,7 +139,7 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
-# ✅ MULTI UPLOAD (writes to activity_photos)
+# ✅ Multi-image upload (writes to activity_photos)
 @router.post(
     "/student/submissions/{submission_id}/photos",
     response_model=PhotosUploadOut,
@@ -114,7 +153,6 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # Validate session exists & belongs to student
     session_res = await db.execute(
         select(ActivitySession).where(
             ActivitySession.id == submission_id,
@@ -136,7 +174,6 @@ async def upload_photos(
         if not file_bytes:
             continue
 
-        # 1) Store image in MinIO
         image_url = await upload_activity_image(
             file_bytes=file_bytes,
             content_type=img.content_type or "application/octet-stream",
@@ -145,7 +182,6 @@ async def upload_photos(
             session_id=session.id,
         )
 
-        # 2) UPSERT into activity_photos by (session_id, seq_no)
         photo_res = await db.execute(
             select(ActivityPhoto).where(
                 ActivityPhoto.session_id == session.id,
@@ -175,14 +211,10 @@ async def upload_photos(
 
         await db.commit()
         await db.refresh(photo)
-
         results.append(photo)
         seq_no += 1
 
-    return PhotosUploadOut(
-        session_id=session.id,
-        photos=results,
-    )
+    return PhotosUploadOut(session_id=session.id, photos=results)
 
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
@@ -195,7 +227,9 @@ async def submit_event(
     return await final_submit(db, submission_id, student.id, payload.description)
 
 
-# ---------------- ADMIN: REVIEW ----------------
+# ══════════════════════════════════════════════
+# ADMIN — Review submissions
+# ══════════════════════════════════════════════
 
 @router.get("/admin/events/{event_id}/submissions", response_model=list[AdminSubmissionOut])
 async def admin_list_event_submissions(

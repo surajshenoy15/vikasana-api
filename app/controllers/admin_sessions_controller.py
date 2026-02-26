@@ -1,29 +1,101 @@
+# app/controllers/admin_sessions_controller.py
+from __future__ import annotations
+
 from typing import Optional
+from datetime import datetime
+
 from fastapi import HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_photo import ActivityPhoto
+from app.models.activity_type import ActivityType
 from app.models.activity_face_check import ActivityFaceCheck
+from app.models.student import Student
+from app.models.student_face_embedding import StudentFaceEmbedding
 
-from app.core.minio_client import get_presigned_url
-import os
+# MinIO presigned URL helper
+import anyio
+from minio import Minio
+from app.core.config import settings
 
-FACE_BUCKET = os.getenv("MINIO_FACE_BUCKET", "face-verification")
-# If raw activity photos are also in minio and you store object keys, set this:
-ACTIVITY_BUCKET = os.getenv("MINIO_ACTIVITY_BUCKET", "activity-uploads")
+# ─────────────────────────────────────────────────────────────
+# MinIO client (reuse pattern from face.py)
+# ─────────────────────────────────────────────────────────────
+
+_minio = Minio(
+    settings.MINIO_ENDPOINT,
+    access_key=settings.MINIO_ACCESS_KEY,
+    secret_key=settings.MINIO_SECRET_KEY,
+    secure=settings.MINIO_SECURE,
+)
+
+_PRESIGN_EXPIRY = 3600  # 1 hour in seconds
 
 
-def _safe_presigned(bucket: str, obj: Optional[str]) -> Optional[str]:
-    if not obj:
+def _extract_object_key(url: str, bucket: str) -> str:
+    """Strip protocol+host+bucket from a URL or return the key directly."""
+    s = (url or "").strip().replace("\\", "/")
+    if not s:
+        return s
+    if "://" in s:
+        s = s.split("://", 1)[1].split("/", 1)[-1]  # remove host
+    if s.startswith(bucket + "/"):
+        s = s[len(bucket) + 1:]
+    return s
+
+
+async def _presign(bucket: str, key: str) -> Optional[str]:
+    """Return a presigned GET URL valid for _PRESIGN_EXPIRY seconds."""
+    if not key:
         return None
     try:
-        return get_presigned_url(bucket=bucket, object_name=obj, expiry_seconds=3600)
+        url = await anyio.to_thread.run_sync(
+            lambda: _minio.presigned_get_object(bucket, key, expires=__import__("datetime").timedelta(seconds=_PRESIGN_EXPIRY))
+        )
+        return url
     except Exception:
-        # don't break sessions page if one object missing
         return None
 
+
+async def _presign_activity(url: str) -> Optional[str]:
+    key = _extract_object_key(url, settings.MINIO_BUCKET_ACTIVITIES)
+    return await _presign(settings.MINIO_BUCKET_ACTIVITIES, key)
+
+
+async def _presign_face(obj: str) -> Optional[str]:
+    key = _extract_object_key(obj, settings.MINIO_FACE_BUCKET)
+    return await _presign(settings.MINIO_FACE_BUCKET, key)
+
+
+# ─────────────────────────────────────────────────────────────
+# Points helper
+# ─────────────────────────────────────────────────────────────
+
+def _calc_session_points(activity_type: Optional[ActivityType], duration_hours: Optional[float]) -> int:
+    """
+    Simple formula mirroring your ActivityType model:
+      units = floor(duration_hours / hours_per_unit)
+      points = min(units * points_per_unit, max_points)
+    Falls back to 0 if data missing.
+    """
+    if not activity_type or not duration_hours:
+        return 0
+    try:
+        hpu = int(activity_type.hours_per_unit or 1)
+        ppu = int(activity_type.points_per_unit or 0)
+        mp = int(activity_type.max_points or 0)
+        units = int(duration_hours / hpu)
+        return min(units * ppu, mp)
+    except Exception:
+        return 0
+
+
+# ─────────────────────────────────────────────────────────────
+# LIST sessions  (admin queue / all / filtered)
+# ─────────────────────────────────────────────────────────────
 
 async def admin_list_sessions(
     db: AsyncSession,
@@ -31,178 +103,323 @@ async def admin_list_sessions(
     q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-):
-    stmt = select(ActivitySession)
-
-    # Filter status
-    if status:
-        stmt = stmt.where(ActivitySession.status == status)
-    else:
-        stmt = stmt.where(
-            ActivitySession.status.in_(
-                [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED]
-            )
+) -> list[dict]:
+    """
+    Returns enriched list rows including:
+    - student name / usn / college (joined)
+    - latest face check summary + presigned processed image URL
+    - in_time / out_time derived from photos
+    - photo count
+    - activity points
+    """
+    stmt = (
+        select(ActivitySession)
+        .options(
+            selectinload(ActivitySession.photos),
         )
+        .order_by(ActivitySession.submitted_at.desc().nulls_last(), ActivitySession.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
 
-    # Optional search (activity_name/session_code)
+    # Default: "Queue" = SUBMITTED + FLAGGED
+    if status is None:
+        stmt = stmt.where(
+            ActivitySession.status.in_([ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED])
+        )
+    else:
+        stmt = stmt.where(ActivitySession.status == status)
+
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(
-            (ActivitySession.activity_name.ilike(like))
-            | (ActivitySession.session_code.ilike(like))
+            or_(
+                ActivitySession.activity_name.ilike(like),
+                ActivitySession.session_code.ilike(like),
+            )
         )
-
-    stmt = stmt.order_by(ActivitySession.id.desc()).limit(limit).offset(offset)
 
     res = await db.execute(stmt)
     sessions = res.scalars().all()
 
-    items = []
-    for s in sessions:
-        photos_count = await db.scalar(
-            select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == s.id)
-        )
+    if not sessions:
+        return []
 
-        latest_fc_res = await db.execute(
-            select(ActivityFaceCheck)
-            .where(ActivityFaceCheck.session_id == s.id)
-            .order_by(ActivityFaceCheck.id.desc())
-            .limit(1)
-        )
-        latest_fc = latest_fc_res.scalars().first()
+    # Bulk-load students
+    student_ids = list({s.student_id for s in sessions if s.student_id})
+    students: dict[int, Student] = {}
+    if student_ids:
+        sr = await db.execute(select(Student).where(Student.id.in_(student_ids)))
+        for st in sr.scalars().all():
+            students[st.id] = st
 
-        latest_face_processed_url = None
-        latest_face_raw_url = None
-        latest_face_matched = None
-        latest_face_reason = None
-        latest_face_score = None
+    # Bulk-load activity types
+    type_ids = list({s.activity_type_id for s in sessions if s.activity_type_id})
+    activity_types: dict[int, ActivityType] = {}
+    if type_ids:
+        tr = await db.execute(select(ActivityType).where(ActivityType.id.in_(type_ids)))
+        for at in tr.scalars().all():
+            activity_types[at.id] = at
 
-        if latest_fc:
-            latest_face_matched = latest_fc.matched
-            latest_face_reason = latest_fc.reason
-            latest_face_score = latest_fc.cosine_score
-
-            # processed_object is stored in face-verification bucket
-            latest_face_processed_url = _safe_presigned(
-                FACE_BUCKET, latest_fc.processed_object
+    # Bulk-load latest face checks per session
+    session_ids = [s.id for s in sessions]
+    face_checks: dict[int, ActivityFaceCheck] = {}
+    if session_ids:
+        # Get the most recent face check per session
+        subq = (
+            select(
+                ActivityFaceCheck.session_id,
+                func.max(ActivityFaceCheck.id).label("max_id"),
             )
-
-            # raw_image_url: if you store object key, you can presign it.
-            # If raw_image_url is already a full URL, just return it.
-            if latest_fc.raw_image_url:
-                if latest_fc.raw_image_url.startswith("http://") or latest_fc.raw_image_url.startswith("https://"):
-                    latest_face_raw_url = latest_fc.raw_image_url
-                else:
-                    latest_face_raw_url = _safe_presigned(ACTIVITY_BUCKET, latest_fc.raw_image_url)
-
-        items.append(
-            {
-                "id": s.id,
-                "student_id": s.student_id,
-                "activity_type_id": s.activity_type_id,
-                "activity_name": s.activity_name,
-                "status": s.status,
-                "submitted_at": s.submitted_at,
-                "flag_reason": s.flag_reason,
-                "created_at": s.created_at,
-                "photos_count": int(photos_count or 0),
-
-                # existing fields
-                "latest_face_matched": latest_face_matched,
-                "latest_face_reason": latest_face_reason,
-                "latest_face_score": latest_face_score,
-
-                # ✅ NEW URLs for UI
-                "latest_face_processed_url": latest_face_processed_url,
-                "latest_face_raw_url": latest_face_raw_url,
-            }
+            .where(ActivityFaceCheck.session_id.in_(session_ids))
+            .group_by(ActivityFaceCheck.session_id)
+            .subquery()
         )
+        fcr = await db.execute(
+            select(ActivityFaceCheck).join(
+                subq,
+                (ActivityFaceCheck.session_id == subq.c.session_id)
+                & (ActivityFaceCheck.id == subq.c.max_id),
+            )
+        )
+        for fc in fcr.scalars().all():
+            face_checks[fc.session_id] = fc
 
-    return items
+    # Build rows
+    rows = []
+    for s in sessions:
+        st = students.get(s.student_id)
+        at = activity_types.get(s.activity_type_id)
+        fc = face_checks.get(s.id)
+
+        photos = list(s.photos or [])
+        photo_times = [p.captured_at for p in photos if p.captured_at]
+        in_time = min(photo_times) if photo_times else None
+        out_time = max(photo_times) if photo_times else None
+
+        points = _calc_session_points(at, s.duration_hours)
+
+        # Presign face processed image
+        face_processed_url = None
+        if fc and fc.processed_object:
+            face_processed_url = await _presign_face(fc.processed_object)
+
+        rows.append({
+            "id": s.id,
+            "student_id": s.student_id,
+            "student_name": st.name if st else None,
+            "usn": st.usn if st else None,
+            "college": st.college if st else None,
+            "activity_type_id": s.activity_type_id,
+            "activity_name": s.activity_name,
+            "description": s.description,
+            "status": s.status.value if hasattr(s.status, "value") else str(s.status),
+            "started_at": s.started_at,
+            "submitted_at": s.submitted_at,
+            "expires_at": s.expires_at,
+            "duration_hours": s.duration_hours,
+            "flag_reason": s.flag_reason,
+            "photos_count": len(photos),
+            # Derived timing from photos
+            "in_time": in_time,
+            "out_time": out_time,
+            # Activity points
+            "total_activity_points": points,
+            "activity_type": {
+                "id": at.id,
+                "name": at.name,
+                "points_per_unit": at.points_per_unit,
+                "max_points": at.max_points,
+                "hours_per_unit": at.hours_per_unit,
+            } if at else None,
+            # Face summary
+            "latest_face_matched": fc.matched if fc else None,
+            "latest_face_reason": fc.reason if fc else None,
+            "latest_face_processed_url": face_processed_url,
+            "latest_face_check": {
+                "id": fc.id,
+                "matched": fc.matched,
+                "cosine_score": fc.cosine_score,
+                "l2_score": fc.l2_score,
+                "total_faces": fc.total_faces,
+                "reason": fc.reason,
+                "processed_object": fc.processed_object,
+            } if fc else None,
+        })
+
+    return rows
 
 
-async def admin_get_session_detail(db: AsyncSession, session_id: int):
-    s = await db.get(ActivitySession, session_id)
+# ─────────────────────────────────────────────────────────────
+# GET session detail (full)
+# ─────────────────────────────────────────────────────────────
+
+async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
+    res = await db.execute(
+        select(ActivitySession)
+        .where(ActivitySession.id == session_id)
+        .options(selectinload(ActivitySession.photos))
+    )
+    s = res.scalar_one_or_none()
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    photos_res = await db.execute(
-        select(ActivityPhoto)
-        .where(ActivityPhoto.session_id == session_id)
-        .order_by(ActivityPhoto.captured_at.asc())
-    )
-    photos = photos_res.scalars().all()
+    st = await db.get(Student, s.student_id)
+    at = await db.get(ActivityType, s.activity_type_id)
 
-    face_res = await db.execute(
+    # All face checks for this session (ordered)
+    fcr = await db.execute(
         select(ActivityFaceCheck)
         .where(ActivityFaceCheck.session_id == session_id)
         .order_by(ActivityFaceCheck.id.desc())
-        .limit(1)
     )
-    latest_face = face_res.scalars().first()
+    all_face_checks = fcr.scalars().all()
+    latest_fc = all_face_checks[0] if all_face_checks else None
 
-    latest_face_processed_url = None
-    latest_face_raw_url = None
+    photos = list(s.photos or [])
+    photo_times = [p.captured_at for p in photos if p.captured_at]
+    in_time = min(photo_times) if photo_times else None
+    out_time = max(photo_times) if photo_times else None
 
-    if latest_face:
-        latest_face_processed_url = _safe_presigned(FACE_BUCKET, latest_face.processed_object)
+    points = _calc_session_points(at, s.duration_hours)
 
-        if latest_face.raw_image_url:
-            if latest_face.raw_image_url.startswith("http://") or latest_face.raw_image_url.startswith("https://"):
-                latest_face_raw_url = latest_face.raw_image_url
-            else:
-                latest_face_raw_url = _safe_presigned(ACTIVITY_BUCKET, latest_face.raw_image_url)
+    # Presign face processed image
+    face_processed_url = None
+    if latest_fc and latest_fc.processed_object:
+        face_processed_url = await _presign_face(latest_fc.processed_object)
+
+    # Build photo details with presigned URLs + geo info
+    photos_out = []
+    for p in sorted(photos, key=lambda x: x.seq_no or 0):
+        presigned = await _presign_activity(p.image_url)
+        # Find face check for this photo
+        ph_fc = next((fc for fc in all_face_checks if fc.photo_id == p.id), None)
+        ph_face_url = None
+        if ph_fc and ph_fc.processed_object:
+            ph_face_url = await _presign_face(ph_fc.processed_object)
+
+        photos_out.append({
+            "id": p.id,
+            "seq_no": p.seq_no,
+            "image_url": presigned or p.image_url,
+            "captured_at": p.captured_at,
+            "lat": p.lat,
+            "lng": p.lng,
+            "distance_m": getattr(p, "distance_m", None),
+            "is_in_geofence": bool(getattr(p, "is_in_geofence", True)),
+            "geo_flag_reason": getattr(p, "geo_flag_reason", None),
+            "sha256": getattr(p, "sha256", None),
+            # Per-photo face info
+            "face_matched": ph_fc.matched if ph_fc else None,
+            "face_reason": ph_fc.reason if ph_fc else None,
+            "face_processed_url": ph_face_url,
+        })
+
+    # Location trail: all unique lat/lng points ordered by capture time
+    location_trail = [
+        {
+            "seq_no": p["seq_no"],
+            "lat": p["lat"],
+            "lng": p["lng"],
+            "captured_at": p["captured_at"],
+            "is_in_geofence": p["is_in_geofence"],
+            "distance_m": p["distance_m"],
+        }
+        for p in photos_out
+        if p["lat"] is not None and p["lng"] is not None
+    ]
 
     return {
         "id": s.id,
         "student_id": s.student_id,
+        "student_name": st.name if st else None,
+        "usn": st.usn if st else None,
+        "college": st.college if st else None,
+        "face_enrolled": st.face_enrolled if st else None,
+
         "activity_type_id": s.activity_type_id,
         "activity_name": s.activity_name,
         "description": s.description,
-        "status": s.status,
-        "started_at": s.started_at,
-        "expires_at": s.expires_at,
-        "submitted_at": s.submitted_at,
+        "status": s.status.value if hasattr(s.status, "value") else str(s.status),
         "flag_reason": s.flag_reason,
-        "created_at": s.created_at,
-        "photos": photos,
 
-        # keep existing object if you want (but UI should use URLs)
-        "latest_face_check": latest_face,
+        "started_at": s.started_at,
+        "submitted_at": s.submitted_at,
+        "expires_at": s.expires_at,
+        "duration_hours": s.duration_hours,
 
-        # ✅ NEW URLs
-        "latest_face_processed_url": latest_face_processed_url,
-        "latest_face_raw_url": latest_face_raw_url,
+        # ✅ In/Out time from photo timestamps
+        "in_time": in_time,
+        "out_time": out_time,
+
+        # ✅ Activity type + points
+        "activity_type": {
+            "id": at.id,
+            "name": at.name,
+            "hours_per_unit": at.hours_per_unit,
+            "points_per_unit": at.points_per_unit,
+            "max_points": at.max_points,
+            "target_lat": getattr(at, "target_lat", None),
+            "target_lng": getattr(at, "target_lng", None),
+            "radius_m": getattr(at, "radius_m", 500),
+            "maps_url": getattr(at, "maps_url", None),
+        } if at else None,
+        "total_activity_points": points,
+
+        # ✅ Face verification
+        "latest_face_matched": latest_fc.matched if latest_fc else None,
+        "latest_face_reason": latest_fc.reason if latest_fc else None,
+        "latest_face_processed_url": face_processed_url,
+        "latest_face_check": {
+            "id": latest_fc.id,
+            "matched": latest_fc.matched,
+            "cosine_score": latest_fc.cosine_score,
+            "l2_score": latest_fc.l2_score,
+            "total_faces": latest_fc.total_faces,
+            "reason": latest_fc.reason,
+            "processed_object": latest_fc.processed_object,
+        } if latest_fc else None,
+
+        # ✅ Photos with presigned URLs + per-photo face info
+        "photos": photos_out,
+
+        # ✅ Location trail
+        "location_trail": location_trail,
+
+        # Target location from activity type
+        "target_location": {
+            "maps_url": getattr(at, "maps_url", None),
+            "target_lat": getattr(at, "target_lat", None),
+            "target_lng": getattr(at, "target_lng", None),
+            "radius_m": int(getattr(at, "radius_m", 500) or 500),
+        } if at else None,
     }
 
 
-async def admin_approve_session(db: AsyncSession, session_id: int):
+# ─────────────────────────────────────────────────────────────
+# APPROVE / REJECT
+# ─────────────────────────────────────────────────────────────
+
+async def admin_approve_session(db: AsyncSession, session_id: int) -> ActivitySession:
     s = await db.get(ActivitySession, session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    if s.status not in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED]:
-        raise HTTPException(
-            status_code=400,
-            detail="Only SUBMITTED/FLAGGED sessions can be approved",
-        )
+    if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
+        raise HTTPException(status_code=400, detail=f"Cannot approve session in status {s.status}")
 
     s.status = ActivitySessionStatus.APPROVED
+    s.flag_reason = None
     await db.commit()
     await db.refresh(s)
     return s
 
 
-async def admin_reject_session(db: AsyncSession, session_id: int, reason: str):
+async def admin_reject_session(db: AsyncSession, session_id: int, reason: str) -> ActivitySession:
     s = await db.get(ActivitySession, session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    if s.status not in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED]:
-        raise HTTPException(
-            status_code=400,
-            detail="Only SUBMITTED/FLAGGED sessions can be rejected",
-        )
+    if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
+        raise HTTPException(status_code=400, detail=f"Cannot reject session in status {s.status}")
 
     s.status = ActivitySessionStatus.REJECTED
     s.flag_reason = reason
