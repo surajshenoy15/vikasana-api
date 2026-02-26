@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -18,11 +18,10 @@ from app.controllers.activity_controller import (
     create_session,
     add_photo_to_session,
     submit_session,
-    list_student_sessions,          # ✅ ADD
-    get_student_session_detail,      # ✅ ADD
+    list_student_sessions,
+    get_student_session_detail,
 )
 
-# ✅ Use your MinIO-style uploader (bytes -> url)
 from app.core.activity_storage import upload_activity_image
 
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
@@ -57,6 +56,55 @@ async def create_activity_session(
     )
 
 
+async def _handle_photo_upload_and_save(
+    *,
+    db: AsyncSession,
+    student_id: int,
+    session_id: int,
+    meta_captured_at: str,
+    lat: float,
+    lng: float,
+    sha256: str | None,
+    image: UploadFile,
+) -> PhotoOut:
+    # 1) Read bytes
+    file_bytes = await image.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    # 2) Upload to MinIO and get URL
+    image_url = await upload_activity_image(
+        file_bytes=file_bytes,
+        content_type=image.content_type or "application/octet-stream",
+        filename=image.filename or "photo.jpg",
+        student_id=student_id,
+        session_id=session_id,
+    )
+
+    # 3) Parse captured_at (accept Z)
+    from datetime import datetime
+
+    s = (meta_captured_at or "").strip()
+    if not s:
+        raise HTTPException(status_code=422, detail="meta_captured_at is required")
+
+    s = s.replace("Z", "+00:00")
+    captured_at = datetime.fromisoformat(s)
+
+    # 4) Save photo record (upsert handled in controller)
+    return await add_photo_to_session(
+        db=db,
+        student_id=student_id,
+        session_id=session_id,
+        image_url=image_url,
+        captured_at=captured_at,
+        lat=lat,
+        lng=lng,
+        sha256=sha256,
+    )
+
+
+# ✅ Primary endpoint (your current one)
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
@@ -68,38 +116,15 @@ async def upload_activity_photo(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # 1) Read bytes from upload
-    file_bytes = await image.read()
-    if not file_bytes:
-        raise ValueError("Empty file")
-
-    # 2) Upload to MinIO and get URL
-    image_url = await upload_activity_image(
-        file_bytes=file_bytes,
-        content_type=image.content_type or "application/octet-stream",
-        filename=image.filename or "photo.jpg",
-        student_id=student.id,
-        session_id=session_id,
-    )
-
-    # 3) Parse captured_at
-    from datetime import datetime
-
-    s = meta_captured_at.strip()
-    s = s.replace("Z", "+00:00")          # allow Zulu
-    s = s.replace(" ", "+") if " " in s and "+" not in s else s  # allow " 00:00" style
-    captured_at = datetime.fromisoformat(s)
-
-    # 4) Save photo record
-    return await add_photo_to_session(
+    return await _handle_photo_upload_and_save(
         db=db,
         student_id=student.id,
         session_id=session_id,
-        image_url=image_url,
-        captured_at=captured_at,
+        meta_captured_at=meta_captured_at,
         lat=lat,
         lng=lng,
         sha256=sha256,
+        image=image,
     )
 
 
@@ -133,12 +158,14 @@ async def admin_list_types(
 
 from app.schemas.activity import SessionListItemOut, SessionDetailOut
 
+
 @router.get("/sessions", response_model=list[SessionListItemOut])
 async def my_sessions(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
     return await list_student_sessions(db, student.id)
+
 
 @router.get("/sessions/{session_id}", response_model=SessionDetailOut)
 async def session_detail(
@@ -147,3 +174,42 @@ async def session_detail(
     student=Depends(get_current_student),
 ):
     return await get_student_session_detail(db, student.id, session_id)
+
+
+# ============================================================
+# ✅ COMPATIBILITY ROUTER (ALIAS) FOR YOUR FRONTEND CALL
+# Frontend expects:
+#   POST /api/student/submissions/{id}/photos?start_seq=1
+# We'll provide:
+#   POST /api/student/submissions/{submission_id}/photos
+# that forwards to the same logic.
+# ============================================================
+
+legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
+
+
+@legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
+async def legacy_upload_submission_photo(
+    submission_id: int,
+    start_seq: int = Query(1, ge=1),  # accepted but not required by backend
+    meta_captured_at: str = Query(..., description="ISO datetime"),
+    lat: float = Query(...),
+    lng: float = Query(...),
+    sha256: str | None = Query(None),
+    image: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    # NOTE: start_seq is ignored unless you want to map it to seq_no.
+    # Your controller uses UNIQUE(session_id, seq_no). If you want seq_no support,
+    # update add_photo_to_session to accept seq_no.
+    return await _handle_photo_upload_and_save(
+        db=db,
+        student_id=student.id,
+        session_id=submission_id,
+        meta_captured_at=meta_captured_at,
+        lat=lat,
+        lng=lng,
+        sha256=sha256,
+        image=image,
+    )
