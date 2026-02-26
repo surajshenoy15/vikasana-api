@@ -34,7 +34,7 @@ async def create_session(
     s = ActivitySession(
         student_id=student.id,
         activity_type_id=activity_type_id,
-        status=ActivitySessionStatus.IN_PROGRESS,
+        status=ActivitySessionStatus.DRAFT,
         started_at=captured_at,
         started_lat=lat,
         started_lng=lng,
