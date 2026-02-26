@@ -42,7 +42,7 @@ from app.controllers.activity_controller import (
 from app.core.activity_storage import upload_activity_image
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
-from app.models.event import Event  # ✅ Event model
+from app.models.events import Event  # ✅ Event model
 
 
 # NOTE:
