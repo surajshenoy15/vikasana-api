@@ -1,5 +1,16 @@
 # app/routes/activity.py
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
+
+from __future__ import annotations
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    UploadFile,
+    File,
+    Query,
+    HTTPException,
+    Form,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -32,6 +43,12 @@ from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 
 
+# NOTE:
+# These routers are typically included in main.py with prefix="/api"
+# Example:
+#   app.include_router(router, prefix="/api")
+#   app.include_router(admin_router, prefix="/api")
+#   app.include_router(legacy_router, prefix="/api")
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
 admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
 legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
@@ -253,7 +270,11 @@ async def _handle_photo_upload_and_save(
     )
 
 
+# IMPORTANT:
+# React Native/Expo sometimes fails on POST redirects (307).
+# So we accept BOTH /photos and /photos/ to eliminate redirect-slash issues.
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
+@router.post("/sessions/{session_id}/photos/", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
     seq_no: int | None = Query(
@@ -332,6 +353,7 @@ async def admin_list_types(
 #   POST /api/student/submissions/{id}/photos?start_seq=1
 # ─────────────────────────────────────────────────────────────
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
+@legacy_router.post("/submissions/{submission_id}/photos/", response_model=PhotoOut)
 async def legacy_upload_submission_photo(
     submission_id: int,
     start_seq: int = Query(1, ge=1),
@@ -358,14 +380,14 @@ async def legacy_upload_submission_photo(
     cap = meta_captured_at or captured_at or meta_captured_at_f or captured_at_f
 
     lat_val = (
-        lat if lat is not None else
-        (latitude if latitude is not None else
-         (lat_f if lat_f is not None else latitude_f))
+        lat
+        if lat is not None
+        else (latitude if latitude is not None else (lat_f if lat_f is not None else latitude_f))
     )
     lng_val = (
-        lng if lng is not None else
-        (longitude if longitude is not None else
-         (lng_f if lng_f is not None else longitude_f))
+        lng
+        if lng is not None
+        else (longitude if longitude is not None else (lng_f if lng_f is not None else longitude_f))
     )
 
     sha = sha256 or sha256_f
