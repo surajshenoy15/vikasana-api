@@ -44,13 +44,12 @@ from app.controllers.activity_controller import (
 from app.core.activity_storage import upload_activity_image
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
-from app.models.activity_type import ActivityType  # ✅ REQUIRED for admin update
-from app.models.events import Event  # ✅ Event model
+from app.models.activity_type import ActivityType
+from app.models.events import Event
 
-# ✅ Face check additions
+# ✅ Face check models + services
 from app.models.activity_face_check import ActivityFaceCheck
 from app.models.student_face_embedding import StudentFaceEmbedding
-from app.controllers.activity_face_check_controller import upsert_face_check
 from app.services.face_service import match_in_group
 
 
@@ -58,9 +57,6 @@ router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
 admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
 legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
 
-# ─────────────────────────────────────────────────────────────
-# Auto-approval rules
-# ─────────────────────────────────────────────────────────────
 AUTO_APPROVE_MIN_MATCHES = 3
 MAX_PHOTOS_FOR_AUTO = 5
 
@@ -77,14 +73,6 @@ def _normalize_ddmmyyyy_date(date_part: str) -> str:
 
 
 def parse_captured_at(meta_captured_at: str):
-    """
-    Accepts:
-      - ISO: 2026-02-26T11:39:49+05:30 / 2026-02-26T06:09:49Z
-      - DD/MM/YYYY, hh:mm:ss am/pm  (example: 26/2/2026, 11:39:49 am)
-      - DD/MM/YYYY hh:mm:ss am/pm
-      - DD-MM-YYYY, hh:mm:ss am/pm
-    If timezone missing, assumes Asia/Kolkata.
-    """
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -154,12 +142,6 @@ def parse_captured_at(meta_captured_at: str):
         detail={
             "message": "Invalid meta_captured_at format",
             "received": s,
-            "expected_examples": [
-                "2026-02-26T11:39:49+05:30",
-                "2026-02-26T06:09:49Z",
-                "26/2/2026, 11:39:49 am",
-                "26/02/2026 11:39:49 AM",
-            ],
             "error": str(last_err) if last_err else "unparseable",
         },
     )
@@ -189,7 +171,7 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # ✅ Allow upload in DRAFT and FLAGGED (so student can fix & resubmit)
+    # ✅ Allow upload in DRAFT and FLAGGED
     if session.status not in (ActivitySessionStatus.DRAFT, ActivitySessionStatus.FLAGGED):
         raise HTTPException(status_code=400, detail="Cannot upload photos in current session status")
 
@@ -198,6 +180,77 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
         session.status = ActivitySessionStatus.EXPIRED
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
+
+
+# ─────────────────────────────────────────────────────────────
+# Face check upsert (INLINE to avoid missing controller import)
+# ─────────────────────────────────────────────────────────────
+async def upsert_face_check(
+    db: AsyncSession,
+    *,
+    session_id: int,
+    photo_id: int,
+    matched: bool,
+    cosine_score: Optional[float] = None,
+    l2_score: Optional[float] = None,
+    total_faces: Optional[int] = None,
+    processed_object: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> ActivityFaceCheck:
+    photo = await db.get(ActivityPhoto, photo_id)
+    if not photo:
+        raise HTTPException(status_code=404, detail="ActivityPhoto not found")
+
+    if photo.student_id is None:
+        raise HTTPException(status_code=400, detail="ActivityPhoto.student_id is NULL; cannot create face check")
+
+    session = await db.get(ActivitySession, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="ActivitySession not found")
+
+    if photo.session_id != session_id:
+        raise HTTPException(status_code=400, detail="photo_id does not belong to session_id")
+
+    if session.student_id != photo.student_id:
+        raise HTTPException(status_code=400, detail="session and photo belong to different students")
+
+    student_id = photo.student_id
+
+    existing = await db.execute(
+        select(ActivityFaceCheck).where(
+            ActivityFaceCheck.session_id == session_id,
+            ActivityFaceCheck.photo_id == photo_id,
+        )
+    )
+    face_check = existing.scalar_one_or_none()
+
+    if face_check:
+        face_check.student_id = student_id
+        face_check.matched = matched
+        face_check.cosine_score = cosine_score
+        face_check.l2_score = l2_score
+        face_check.total_faces = total_faces
+        face_check.processed_object = processed_object
+        face_check.reason = reason
+        await db.commit()
+        await db.refresh(face_check)
+        return face_check
+
+    face_check = ActivityFaceCheck(
+        student_id=student_id,
+        session_id=session_id,
+        photo_id=photo_id,
+        matched=matched,
+        cosine_score=cosine_score,
+        l2_score=l2_score,
+        total_faces=total_faces,
+        processed_object=processed_object,
+        reason=reason,
+    )
+    db.add(face_check)
+    await db.commit()
+    await db.refresh(face_check)
+    return face_check
 
 
 # ─────────────────────────────────────────────────────────────
@@ -225,11 +278,6 @@ async def _count_face_matches(db: AsyncSession, session_id: int) -> int:
 
 
 async def _maybe_auto_approve(db: AsyncSession, session_id: int) -> dict:
-    """
-    After submit, we want:
-      - if matched >= 3 => APPROVED
-      - else => FLAGGED
-    """
     session = await db.get(ActivitySession, session_id)
     if not session:
         return {"auto_approved": False, "matched_count": 0}
@@ -258,11 +306,6 @@ async def _maybe_auto_approve(db: AsyncSession, session_id: int) -> dict:
 # Photo replacement helper (fix unique constraint on seq_no)
 # ─────────────────────────────────────────────────────────────
 async def _delete_existing_photo_if_any(db: AsyncSession, session_id: int, seq_no: int):
-    """
-    Because activity_photos has unique constraint (session_id, seq_no),
-    if student re-uploads same seq_no, delete old one first.
-    (FaceChecks will cascade delete via relationship/cascade.)
-    """
     r = await db.execute(
         select(ActivityPhoto).where(
             ActivityPhoto.session_id == session_id,
@@ -276,7 +319,7 @@ async def _delete_existing_photo_if_any(db: AsyncSession, session_id: int, seq_n
 
 
 # ─────────────────────────────────────────────────────────────
-# Student - Activity
+# Student routes
 # ─────────────────────────────────────────────────────────────
 @router.get("/types", response_model=list[ActivityTypeOut])
 async def get_types(db: AsyncSession = Depends(get_db)):
@@ -305,14 +348,7 @@ async def create_activity_session(
         payload.activity_name,
         payload.description,
     )
-
-    return {
-        "success": True,
-        "session_id": s.id,
-        "id": s.id,
-        "status": getattr(s, "status", None),
-        "session": s,
-    }
+    return {"success": True, "session_id": s.id, "id": s.id, "status": getattr(s, "status", None), "session": s}
 
 
 @router.post("/sessions/from-event")
@@ -327,16 +363,8 @@ async def create_activity_session_from_event(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found or inactive")
 
-    EVENT_ACTIVITY_TYPE_ID = 6  # ✅ Event Activity
-
-    s = await create_session(
-        db,
-        student.id,
-        EVENT_ACTIVITY_TYPE_ID,
-        ev.title,
-        description,
-    )
-
+    EVENT_ACTIVITY_TYPE_ID = 6
+    s = await create_session(db, student.id, EVENT_ACTIVITY_TYPE_ID, ev.title, description)
     return {"success": True, "session_id": s.id, "id": s.id, "status": getattr(s, "status", None)}
 
 
@@ -373,10 +401,9 @@ async def _handle_photo_upload_and_save(
 
     seq_no_int = int(seq_no)
 
-    # ✅ Replace old photo if same seq_no exists (prevents unique constraint crash)
+    # ✅ Replace old photo if same seq_no exists
     await _delete_existing_photo_if_any(db, session_id, seq_no_int)
 
-    # ✅ Save photo row
     photo = await add_photo_to_session(
         db=db,
         student_id=student_id,
@@ -389,10 +416,9 @@ async def _handle_photo_upload_and_save(
         sha256=sha256,
     )
 
-    # ✅ Face check best-effort (do not block upload)
+    # ✅ Face check best-effort
     try:
         stored_embedding = await _get_student_embedding(db, student_id)
-
         if stored_embedding:
             img_b64 = base64.b64encode(file_bytes).decode("utf-8")
             result = match_in_group(img_b64, stored_embedding)
@@ -409,9 +435,8 @@ async def _handle_photo_upload_and_save(
                 reason=result.get("reason"),
             )
 
-            # If already submitted/flagged, try auto approve
+            # if already submitted/flagged, try auto approve immediately
             await _maybe_auto_approve(db, session_id)
-
     except Exception:
         pass
 
@@ -475,10 +500,8 @@ async def submit_activity(
 ):
     session, newly, total_points, total_hours = await submit_session(db, student.id, session_id)
 
-    # ✅ Auto approve rule: 3+ matched photos (otherwise FLAGGED)
     face_auto = await _maybe_auto_approve(db, session_id)
 
-    # refresh session (because status may have changed)
     session = await db.get(ActivitySession, session_id)
 
     return {
