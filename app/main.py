@@ -23,15 +23,18 @@ from app.routes.events import router as events_router
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
 
-# ✅ students routers (faculty + admin) from app/routes/students.py
+# students routers
 from app.routes.students import (
     faculty_router as faculty_students_router,
     admin_router as admin_students_router,
-    student_router as student_profile_router,  # ✅ ADD THIS
+    student_router as student_profile_router,
 )
 
-# ✅ NEW: Face router
+# face router
 from app.routes.face_routes import router as face_router
+
+# ✅ NEW: admin sessions router (THIS FIXES /api/admin/sessions)
+from app.routes.admin_sessions import router as admin_sessions_router
 
 
 app = FastAPI(
@@ -42,7 +45,6 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None,
 )
 
-# ───────── SAFE VALIDATION HANDLER (FIXES UNICODE CRASH) ─────────
 def _sanitize(obj):
     if isinstance(obj, (bytes, bytearray)):
         return f"<bytes:{len(obj)}>"
@@ -81,34 +83,26 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/api")
 app.include_router(faculty_main_router, prefix="/api")
 
-# ✅ Students (NEW)
-app.include_router(faculty_students_router, prefix="/api")  # /api/faculty/students
-app.include_router(admin_students_router, prefix="/api")    # /api/admin/students
-app.include_router(student_profile_router, prefix="/api")    # ✅ /api/students/me
+app.include_router(faculty_students_router, prefix="/api")
+app.include_router(admin_students_router, prefix="/api")
+app.include_router(student_profile_router, prefix="/api")
 
-# Auth for students (OTP etc)
 app.include_router(student_auth_router, prefix="/api")
 
-# Activities
 app.include_router(student_activity_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
-# Summary + Events
+# ✅ ADD THIS LINE
+app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
+
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 
-# ✅ Face Recognition
-app.include_router(face_router, prefix="/api")  # final endpoints -> /api/face/...
+app.include_router(face_router, prefix="/api")  # -> /api/face/...
 
-# ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
 async def root():
-    return {
-        "status": "ok",
-        "app": "Vikasana Foundation API",
-        "env": settings.APP_ENV,
-    }
-
+    return {"status": "ok", "app": "Vikasana Foundation API", "env": settings.APP_ENV}
 
 @app.get("/health", tags=["Health"])
 async def health():
