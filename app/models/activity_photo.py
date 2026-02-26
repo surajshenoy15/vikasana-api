@@ -1,81 +1,63 @@
-from datetime import datetime
-from fastapi import HTTPException
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import (
+    Column,
+    Integer,
+    ForeignKey,
+    DateTime,
+    Float,
+    Text,
+    UniqueConstraint,
+    func,
+    Index,
+)
+from sqlalchemy.orm import relationship
 
-from app.models.activity_session import ActivitySession
-from app.models.activity_photo import ActivityPhoto
-from app.models.events import Event  # adjust import if your Event model path differs
+from app.core.database import Base
 
 
-async def add_photo(
-    db: AsyncSession,
-    submission_id: int,     # this is ActivitySession.id
-    student_id: int,
-    seq_no: int,
-    image_url: str,
-    lat: float,
-    lng: float,
-    captured_at: datetime | None = None,
-    sha256: str | None = None,
-):
-    # 1) Validate session belongs to student
-    q = await db.execute(
-        select(ActivitySession).where(
-            ActivitySession.id == submission_id,
-            ActivitySession.student_id == student_id,
-        )
+class ActivityPhoto(Base):
+    __tablename__ = "activity_photos"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    session_id = Column(
+        Integer,
+        ForeignKey("activity_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
-    session = q.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Session not found for this student")
 
-    # 2) Ensure session is in progress (if you have status)
-    if hasattr(session, "status") and session.status not in ("in_progress", "IN_PROGRESS"):
-        raise HTTPException(status_code=400, detail="Session already completed")
-
-    # 3) Validate seq_no against event.required_photos (if session has event_id)
-    if hasattr(session, "event_id") and session.event_id:
-        rq = await db.execute(select(Event.required_photos).where(Event.id == session.event_id))
-        required_photos = rq.scalar_one()
-        if seq_no < 1 or seq_no > required_photos:
-            raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {required_photos}")
-
-    # 4) Upsert by (session_id, seq_no)
-    pq = await db.execute(
-        select(ActivityPhoto).where(
-            ActivityPhoto.session_id == session.id,
-            ActivityPhoto.seq_no == seq_no,
-        )
+    student_id = Column(
+        Integer,
+        ForeignKey("students.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
-    existing = pq.scalar_one_or_none()
 
-    if captured_at is None:
-        captured_at = datetime.utcnow()
+    seq_no = Column(Integer, nullable=False, index=True)
 
-    if existing:
-        existing.image_url = image_url
-        existing.lat = float(lat)
-        existing.lng = float(lng)
-        existing.captured_at = captured_at
-        if sha256 is not None:
-            existing.sha256 = sha256
+    image_url = Column(Text, nullable=False)
 
-        await db.commit()
-        await db.refresh(existing)
-        return existing
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
 
-    photo = ActivityPhoto(
-        session_id=session.id,
-        student_id=student_id,
-        seq_no=seq_no,
-        image_url=image_url,
-        lat=float(lat),
-        lng=float(lng),
-        captured_at=captured_at,
-        sha256=sha256,
+    captured_at = Column(DateTime(timezone=True), nullable=True)
+
+    sha256 = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "seq_no", name="uq_activity_photos_session_seq"),
+        Index("ix_activity_photos_student_session", "student_id", "session_id"),
     )
-    db.add(photo)
-    await db.commit()
-    await db.refresh(photo)
-    return photo
+
+    # Relationships (string refs to avoid circular imports)
+    session = relationship("ActivitySession", back_populates="photos")
+    student = relationship("Student", back_populates="activity_photos")
+
+    face_checks = relationship(
+        "ActivityFaceCheck",
+        back_populates="photo",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

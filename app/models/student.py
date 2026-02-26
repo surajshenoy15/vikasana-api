@@ -14,6 +14,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+
 from app.core.database import Base
 
 
@@ -142,3 +143,9 @@ class Student(Base):
         back_populates="student",
         cascade="all, delete-orphan",
     )
+
+    activity_photos: Mapped[List["ActivityPhoto"]] = relationship(
+    "ActivityPhoto",
+    back_populates="student",
+    cascade="all, delete-orphan",
+)
