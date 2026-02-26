@@ -3,6 +3,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from sqlalchemy import select, delete as sql_delete
+from datetime import date
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 
@@ -131,7 +132,14 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
-    q = await db.execute(select(Event).where(Event.is_active == True))
+    today = date.today()
+    q = await db.execute(
+        select(Event).where(
+            Event.is_active == True,
+            Event.event_date != None,
+            Event.event_date >= today
+        ).order_by(Event.event_date.asc(), Event.start_time.asc().nulls_last(), Event.id.desc())
+    )
     return q.scalars().all()
 
 

@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import base64
+import io
 from pathlib import Path
+from PIL import Image, ImageOps  # ✅ add pillow
 
 MODEL_DIR        = Path(__file__).parent.parent / "models" / "face"
 DETECTOR_MODEL   = str(MODEL_DIR / "face_detection_yunet_2023mar.onnx")
@@ -10,52 +12,111 @@ RECOGNIZER_MODEL = str(MODEL_DIR / "face_recognition_sface_2021dec.onnx")
 COSINE_THRESHOLD = 0.3
 L2_THRESHOLD     = 1.1
 
+# ✅ Tunables
+YUNET_SCORE_THRESHOLD = 0.45   # was 0.6 (too strict for many phone photos)
+YUNET_NMS_THRESHOLD   = 0.3
+YUNET_TOP_K           = 5000
+MAX_DETECT_WIDTH      = 960    # ✅ downscale large phone images for stable detection
+
 
 def _decode_image(image_b64: str) -> np.ndarray:
     if "," in image_b64:
         image_b64 = image_b64.split(",", 1)[1]
 
     decoded = base64.b64decode(image_b64)
-    if len(decoded) == 0:
+    if not decoded:
         raise ValueError("Image data is empty after base64 decode.")
 
-    buf = np.frombuffer(decoded, np.uint8)
-    if buf.size == 0:
-        raise ValueError("Image buffer is empty.")
+    # ✅ Fix EXIF orientation (very important on mobile)
+    try:
+        pil = Image.open(io.BytesIO(decoded))
+        pil = ImageOps.exif_transpose(pil)
+        pil = pil.convert("RGB")
+        img_rgb = np.array(pil)  # RGB
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        return img_bgr
+    except Exception:
+        # fallback to OpenCV decode
+        buf = np.frombuffer(decoded, np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("Cannot decode image. Send a valid JPEG or PNG.")
+        return img
 
-    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Cannot decode image. Send a valid JPEG or PNG.")
-    return img
 
-
-def _detect_faces(img: np.ndarray):
+def _resize_for_detection(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
+    if w <= MAX_DETECT_WIDTH:
+        return img
+    scale = MAX_DETECT_WIDTH / float(w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _detect_faces(img_bgr: np.ndarray):
+    # ✅ Stabilize detection on mobile photos
+    det_img = _resize_for_detection(img_bgr)
+    h, w = det_img.shape[:2]
+
     detector = cv2.FaceDetectorYN.create(
         DETECTOR_MODEL, "", (w, h),
-        score_threshold=0.6,
-        nms_threshold=0.3,
-        top_k=5000,
+        score_threshold=YUNET_SCORE_THRESHOLD,
+        nms_threshold=YUNET_NMS_THRESHOLD,
+        top_k=YUNET_TOP_K,
     )
-    _, faces = detector.detect(img)
-    return faces
+
+    # ✅ Ensure detector input size matches current frame
+    detector.setInputSize((w, h))
+
+    _, faces = detector.detect(det_img)
+    if faces is None or len(faces) == 0:
+        return None, det_img, (w, h)
+
+    return faces, det_img, (w, h)
 
 
 def _get_recognizer():
     return cv2.FaceRecognizerSF.create(RECOGNIZER_MODEL, "")
 
 
+def _scale_face_box_to_original(face_row, det_img, orig_img):
+    """
+    YuNet returns [x,y,w,h, ...] in det_img coordinates.
+    If we resized, scale box back to orig image.
+    """
+    x, y, bw, bh = face_row[:4]
+    det_h, det_w = det_img.shape[:2]
+    orig_h, orig_w = orig_img.shape[:2]
+
+    sx = orig_w / float(det_w)
+    sy = orig_h / float(det_h)
+
+    return np.array([x * sx, y * sy, bw * sx, bh * sy], dtype=np.float32)
+
+
 def extract_embedding(image_b64: str) -> list:
-    img   = _decode_image(image_b64)
-    faces = _detect_faces(img)
+    orig = _decode_image(image_b64)
+    faces, det_img, _ = _detect_faces(orig)
 
     if faces is None or len(faces) == 0:
-        raise ValueError("No face detected. Make sure your face is clearly visible.")
+        raise ValueError("No face detected. Ensure good lighting and a clear front-facing photo.")
 
-    largest    = faces[np.argmax(faces[:, 2] * faces[:, 3])]
+    # ✅ choose largest face
+    largest = faces[np.argmax(faces[:, 2] * faces[:, 3])]
+
+    # ✅ scale bbox back to original coordinates (important if resized)
+    bbox = _scale_face_box_to_original(largest, det_img, orig)
+
     recognizer = _get_recognizer()
-    aligned    = recognizer.alignCrop(img, largest)
-    embedding  = recognizer.feature(aligned).flatten().tolist()
+
+    # FaceRecognizerSF expects [x,y,w,h,...] style row; we can create a compatible row:
+    # We only need first 4 values for alignCrop.
+    face_row = np.zeros((15,), dtype=np.float32)
+    face_row[:4] = bbox
+
+    aligned   = recognizer.alignCrop(orig, face_row)
+    embedding = recognizer.feature(aligned).flatten().tolist()
     return embedding
 
 
@@ -67,8 +128,8 @@ def average_embeddings(embeddings: list) -> list:
 
 
 def match_in_group(group_image_b64: str, stored_embedding: list) -> dict:
-    img   = _decode_image(group_image_b64)
-    faces = _detect_faces(img)
+    orig = _decode_image(group_image_b64)
+    faces, det_img, _ = _detect_faces(orig)
 
     if faces is None or len(faces) == 0:
         return {
@@ -82,20 +143,27 @@ def match_in_group(group_image_b64: str, stored_embedding: list) -> dict:
 
     recognizer  = _get_recognizer()
     stored      = np.array(stored_embedding, dtype=np.float32).reshape(1, -1)
+
     best_cosine = -1.0
     best_l2     = float("inf")
     best_box    = None
 
-    for face in faces:
+    for f in faces:
         try:
-            aligned = recognizer.alignCrop(img, face)
+            bbox = _scale_face_box_to_original(f, det_img, orig)
+            face_row = np.zeros((15,), dtype=np.float32)
+            face_row[:4] = bbox
+
+            aligned = recognizer.alignCrop(orig, face_row)
             emb     = recognizer.feature(aligned)
+
             cosine  = recognizer.match(stored, emb, cv2.FaceRecognizerSF_FR_COSINE)
             l2      = recognizer.match(stored, emb, cv2.FaceRecognizerSF_FR_NORM_L2)
+
             if cosine > best_cosine:
-                best_cosine = cosine
-                best_l2     = l2
-                best_box    = face[:4].astype(int).tolist()
+                best_cosine = float(cosine)
+                best_l2     = float(l2)
+                best_box    = bbox.astype(int).tolist()
         except Exception:
             continue
 
@@ -103,11 +171,10 @@ def match_in_group(group_image_b64: str, stored_embedding: list) -> dict:
 
     return {
         "matched":          matched,
-        "cosine_score":     round(float(best_cosine), 4),
-        "l2_score":         round(float(best_l2), 4),
+        "cosine_score":     round(best_cosine, 4) if best_cosine != -1.0 else None,
+        "l2_score":         round(best_l2, 4) if best_l2 != float("inf") else None,
         "cosine_threshold": COSINE_THRESHOLD,
         "matched_face_box": best_box if matched else None,
-        "total_faces":      len(faces),
-        "reason":           "Match found" if matched else
-                            f"Best cosine {best_cosine:.4f} < threshold {COSINE_THRESHOLD}",
+        "total_faces":      int(len(faces)),
+        "reason":           "Match found" if matched else f"Best cosine {best_cosine:.4f} < threshold {COSINE_THRESHOLD}",
     }
