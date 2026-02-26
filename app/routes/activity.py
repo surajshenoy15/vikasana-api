@@ -3,6 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
+from fastapi import Form
+
 
 from app.schemas.activity import (
     ActivityTypeOut,
@@ -217,27 +219,46 @@ async def legacy_upload_submission_photo(
 # ------------------------------------------------------------
 # Legacy routes (to support older frontend URLs)
 # ------------------------------------------------------------
-legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
-
 
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
 async def legacy_upload_submission_photo(
     submission_id: int,
     start_seq: int = Query(1, ge=1),
-    meta_captured_at: str = Query(..., description="ISO datetime with timezone recommended"),
-    lat: float = Query(...),
-    lng: float = Query(...),
+
+    # allow either query OR form
+    meta_captured_at: str | None = Query(None),
+    lat: float | None = Query(None),
+    lng: float | None = Query(None),
+
+    meta_captured_at_f: str | None = Form(None),
+    lat_f: float | None = Form(None),
+    lng_f: float | None = Form(None),
+
     sha256: str | None = Query(None),
-    image: UploadFile = File(...),
+    sha256_f: str | None = Form(None),
+
+    image: UploadFile | None = File(None),
+
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # reuse the existing endpoint logic
+    meta_captured_at = meta_captured_at or meta_captured_at_f
+    lat = lat if lat is not None else lat_f
+    lng = lng if lng is not None else lng_f
+    sha256 = sha256 or sha256_f
+
+    if not meta_captured_at:
+        raise HTTPException(status_code=422, detail="meta_captured_at is required (query or form)")
+    if lat is None or lng is None:
+        raise HTTPException(status_code=422, detail="lat and lng are required (query or form)")
+    if image is None:
+        raise HTTPException(status_code=422, detail="image file is required (multipart/form-data)")
+
     return await upload_activity_photo(
         session_id=submission_id,
         meta_captured_at=meta_captured_at,
-        lat=lat,
-        lng=lng,
+        lat=float(lat),
+        lng=float(lng),
         sha256=sha256,
         image=image,
         db=db,
