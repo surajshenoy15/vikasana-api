@@ -99,15 +99,18 @@ async def add_photo_to_session(
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
-    # enforce 3–5 photos overall
-    photo_count = await db.execute(
+    # current count
+    photo_count_res = await db.execute(
         select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
     )
-    count = int(photo_count.scalar() or 0)
+    count = int(photo_count_res.scalar() or 0)
     if count >= MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # duplication check by sha256 (within same session)
+    # seq_no = next slot (1..MAX_PHOTOS)
+    next_seq = count + 1
+
+    # duplicate check by sha256 (within same session)
     is_dup = False
     if sha256:
         dup = await db.execute(
@@ -119,20 +122,21 @@ async def add_photo_to_session(
         if dup.scalar_one_or_none() is not None:
             is_dup = True
 
-    # create photo row (NO is_duplicate column in DB)
+    # ✅ INSERT with required NOT NULL fields
     p = ActivityPhoto(
         session_id=session_id,
+        student_id=student_id,   # ✅ REQUIRED
+        seq_no=next_seq,         # ✅ REQUIRED
         image_url=image_url,
+        lat=float(lat),
+        lng=float(lng),
         captured_at=captured_at,
-        lat=lat,
-        lng=lng,
         sha256=sha256,
     )
     db.add(p)
     await db.commit()
     await db.refresh(p)
 
-    # return response shape including is_duplicate (computed)
     return {
         "id": p.id,
         "image_url": p.image_url,
