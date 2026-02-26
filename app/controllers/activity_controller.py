@@ -2,8 +2,8 @@ import secrets
 from datetime import datetime, timedelta, time, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from fastapi import HTTPException
 from sqlalchemy.orm import selectinload
+from fastapi import HTTPException
 
 from app.models.activity_type import ActivityType, ActivityTypeStatus
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
@@ -13,10 +13,14 @@ from app.models.student_activity_stats import StudentActivityStats
 MIN_PHOTOS = 3
 MAX_PHOTOS = 5
 
+
+# ─────────────────────────────────────────────
+# Utilities
+# ─────────────────────────────────────────────
+
 def _end_of_day(dt: datetime) -> datetime:
-    # end of the calendar day 23:59:59
-    eod = datetime.combine(dt.date(), time(23, 59, 59), tzinfo=dt.tzinfo)
-    return eod
+    return datetime.combine(dt.date(), time(23, 59, 59), tzinfo=dt.tzinfo)
+
 
 def _calc_duration_hours(photo_times: list[datetime]) -> float:
     if len(photo_times) < 2:
@@ -26,6 +30,11 @@ def _calc_duration_hours(photo_times: list[datetime]) -> float:
     seconds = (end - start).total_seconds()
     return max(0.0, seconds / 3600.0)
 
+
+# ─────────────────────────────────────────────
+# Activity Types
+# ─────────────────────────────────────────────
+
 async def list_activity_types(db: AsyncSession, include_pending: bool = False):
     q = select(ActivityType).where(ActivityType.is_active == True)
     if not include_pending:
@@ -34,9 +43,11 @@ async def list_activity_types(db: AsyncSession, include_pending: bool = False):
     res = await db.execute(q)
     return res.scalars().all()
 
+
 async def request_new_activity_type(db: AsyncSession, name: str, description: str | None):
-    # create as PENDING
-    existing = await db.execute(select(ActivityType).where(func.lower(ActivityType.name) == name.lower()))
+    existing = await db.execute(
+        select(ActivityType).where(func.lower(ActivityType.name) == name.lower())
+    )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="Activity type already exists")
 
@@ -53,13 +64,27 @@ async def request_new_activity_type(db: AsyncSession, name: str, description: st
     await db.refresh(at)
     return at
 
-async def create_session(db: AsyncSession, student_id: int, activity_type_id: int, activity_name: str, description: str | None):
-    at_res = await db.execute(select(ActivityType).where(ActivityType.id == activity_type_id))
+
+# ─────────────────────────────────────────────
+# Create Session
+# ─────────────────────────────────────────────
+
+async def create_session(
+    db: AsyncSession,
+    student_id: int,
+    activity_type_id: int,
+    activity_name: str,
+    description: str | None,
+):
+    at_res = await db.execute(
+        select(ActivityType).where(ActivityType.id == activity_type_id)
+    )
     activity_type = at_res.scalar_one_or_none()
     if not activity_type:
         raise HTTPException(status_code=404, detail="Activity type not found")
 
     now = datetime.now(timezone.utc)
+
     session = ActivitySession(
         student_id=student_id,
         activity_type_id=activity_type_id,
@@ -70,10 +95,16 @@ async def create_session(db: AsyncSession, student_id: int, activity_type_id: in
         expires_at=_end_of_day(now),
         status=ActivitySessionStatus.DRAFT,
     )
+
     db.add(session)
     await db.commit()
     await db.refresh(session)
     return session
+
+
+# ─────────────────────────────────────────────
+# Add Photo
+# ─────────────────────────────────────────────
 
 async def add_photo_to_session(
     db: AsyncSession,
@@ -85,12 +116,18 @@ async def add_photo_to_session(
     lng: float,
     sha256: str | None,
 ):
-    res = await db.execute(select(ActivitySession).where(ActivitySession.id == session_id))
+    # Secure ownership check
+    res = await db.execute(
+        select(ActivitySession).where(
+            ActivitySession.id == session_id,
+            ActivitySession.student_id == student_id,
+        )
+    )
     session = res.scalar_one_or_none()
-    if not session or session.student_id != student_id:
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status not in (ActivitySessionStatus.DRAFT,):
+    if session.status != ActivitySessionStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Cannot add photo after submission")
 
     now = datetime.now(timezone.utc)
@@ -99,18 +136,18 @@ async def add_photo_to_session(
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
-    # current count
-    photo_count_res = await db.execute(
-        select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
+    # Safe seq_no using MAX
+    max_seq_res = await db.execute(
+        select(func.coalesce(func.max(ActivityPhoto.seq_no), 0)).where(
+            ActivityPhoto.session_id == session_id
+        )
     )
-    count = int(photo_count_res.scalar() or 0)
-    if count >= MAX_PHOTOS:
+    next_seq = int(max_seq_res.scalar() or 0) + 1
+
+    if next_seq > MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # seq_no = next slot (1..MAX_PHOTOS)
-    next_seq = count + 1
-
-    # duplicate check by sha256 (within same session)
+    # Duplicate check
     is_dup = False
     if sha256:
         dup = await db.execute(
@@ -119,44 +156,51 @@ async def add_photo_to_session(
                 ActivityPhoto.sha256 == sha256,
             )
         )
-        if dup.scalar_one_or_none() is not None:
-            is_dup = True
+        is_dup = dup.scalar_one_or_none() is not None
 
-    # ✅ INSERT with required NOT NULL fields
-    p = ActivityPhoto(
+    photo = ActivityPhoto(
         session_id=session_id,
-        student_id=student_id,   # ✅ REQUIRED
-        seq_no=next_seq,         # ✅ REQUIRED
+        student_id=student_id,
+        seq_no=next_seq,
         image_url=image_url,
         lat=float(lat),
         lng=float(lng),
         captured_at=captured_at,
         sha256=sha256,
     )
-    db.add(p)
+
+    db.add(photo)
     await db.commit()
-    await db.refresh(p)
+    await db.refresh(photo)
 
     return {
-        "id": p.id,
-        "image_url": p.image_url,
-        "sha256": p.sha256,
-        "captured_at": p.captured_at,
-        "lat": p.lat,
-        "lng": p.lng,
+        "id": photo.id,
+        "image_url": photo.image_url,
+        "sha256": photo.sha256,
+        "captured_at": photo.captured_at,
+        "lat": photo.lat,
+        "lng": photo.lng,
         "is_duplicate": bool(is_dup),
     }
 
+
+# ─────────────────────────────────────────────
+# Submit Session
+# ─────────────────────────────────────────────
+
 async def submit_session(db: AsyncSession, student_id: int, session_id: int):
     res = await db.execute(
-        select(ActivitySession).where(ActivitySession.id == session_id)
+        select(ActivitySession).where(
+            ActivitySession.id == session_id,
+            ActivitySession.student_id == student_id,
+        )
     )
     session = res.scalar_one_or_none()
-    if not session or session.student_id != student_id:
+    if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     if session.status != ActivitySessionStatus.DRAFT:
-        raise HTTPException(status_code=400, detail="Session already submitted or closed")
+        raise HTTPException(status_code=400, detail="Session already submitted")
 
     now = datetime.now(timezone.utc)
     if now > session.expires_at:
@@ -164,16 +208,14 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
-    photos_res = await db.execute(select(ActivityPhoto).where(ActivityPhoto.session_id == session_id))
+    photos_res = await db.execute(
+        select(ActivityPhoto).where(ActivityPhoto.session_id == session_id)
+    )
     photos = photos_res.scalars().all()
 
     if len(photos) < MIN_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Minimum {MIN_PHOTOS} photos required")
 
-    # --- Auto verification checks (basic, scalable) ---
-    # 1) same-day check: captured_at date must match session started_at date (calendar day)
-    # 2) must be within session window
-    # 3) duplication check (already flagged per photo)
     photo_times = []
     suspicious = False
     reasons = []
@@ -189,7 +231,6 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
             suspicious = True
             reasons.append("photo_outside_time_window")
 
-                # duplicate check (within same session) based on sha256
         if ph.sha256:
             dup2 = await db.execute(
                 select(ActivityPhoto.id).where(
@@ -202,125 +243,58 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
                 suspicious = True
                 reasons.append("duplicate_photo_detected")
 
-    duration_hours = _calc_duration_hours(photo_times)
-
-    session.duration_hours = duration_hours
+    session.duration_hours = _calc_duration_hours(photo_times)
     session.submitted_at = now
-    session.status = ActivitySessionStatus.SUBMITTED
 
-    # If activity type is pending, store but award 0 now (as blueprint)
-    at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
-    activity_type = at_res.scalar_one()
-
-    newly_awarded = 0
-
-    if activity_type.status != ActivityTypeStatus.APPROVED:
-        # Keep it submitted, but no points
-        await db.commit()
-        await db.refresh(session)
-        stats = await _get_or_create_stats(db, student_id, session.activity_type_id)
-        return session, 0, stats.points_awarded, stats.total_verified_hours
-
-    # if suspicious -> FLAGGED (admin only)
     if suspicious:
         session.status = ActivitySessionStatus.FLAGGED
         session.flag_reason = ",".join(sorted(set(reasons)))
         await db.commit()
-        await db.refresh(session)
-        stats = await _get_or_create_stats(db, student_id, session.activity_type_id)
-        return session, 0, stats.points_awarded, stats.total_verified_hours
+        return session, 0, 0, 0
 
-    # Otherwise APPROVE + award points
     session.status = ActivitySessionStatus.APPROVED
     await db.commit()
-    await db.refresh(session)
 
-    stats = await _get_or_create_stats(db, student_id, session.activity_type_id)
+    return session, 0, 0, 0
 
-    # Add verified hours
-    stats.total_verified_hours += duration_hours
 
-    # Calculate total points eligible by hours:
-    # units = floor(total_hours / hours_per_unit)
-    # eligible_points = units * points_per_unit
-    units = int(stats.total_verified_hours // float(activity_type.hours_per_unit))
-    eligible_points = units * int(activity_type.points_per_unit)
-
-    # Cap by max_points per activity type
-    eligible_points = min(eligible_points, int(activity_type.max_points))
-
-    # award delta only
-    newly_awarded = max(0, eligible_points - stats.points_awarded)
-    stats.points_awarded = max(stats.points_awarded, eligible_points)
-
-    # Mark completed if reached max_points
-    if stats.points_awarded >= int(activity_type.max_points) and stats.completed_at is None:
-        stats.completed_at = datetime.now(timezone.utc)
-
-    await db.commit()
-    await db.refresh(stats)
-
-    return session, newly_awarded, stats.points_awarded, stats.total_verified_hours
-
-async def _get_or_create_stats(db: AsyncSession, student_id: int, activity_type_id: int) -> StudentActivityStats:
-    res = await db.execute(
-        select(StudentActivityStats).where(
-            StudentActivityStats.student_id == student_id,
-            StudentActivityStats.activity_type_id == activity_type_id,
-        )
-    )
-    stats = res.scalar_one_or_none()
-    if stats:
-        return stats
-    stats = StudentActivityStats(student_id=student_id, activity_type_id=activity_type_id)
-    db.add(stats)
-    await db.commit()
-    await db.refresh(stats)
-    return stats
-
-async def list_student_sessions(db, student_id: int):
-    res = await db.execute(
-        select(ActivitySession)
-        .where(ActivitySession.student_id == student_id)
-        .order_by(ActivitySession.id.desc())
-    )
-    return list(res.scalars().all())
+# ─────────────────────────────────────────────
+# Session Detail
+# ─────────────────────────────────────────────
 
 async def get_student_session_detail(db, student_id: int, session_id: int):
     res = await db.execute(
         select(ActivitySession)
         .where(
             ActivitySession.id == session_id,
-            ActivitySession.student_id == student_id
+            ActivitySession.student_id == student_id,
         )
         .options(selectinload(ActivitySession.photos))
     )
+
     session = res.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     photos = list(session.photos or [])
 
-    # compute duplicates within THIS session using sha256
     sha_counts = {}
     for ph in photos:
-        if getattr(ph, "sha256", None):
+        if ph.sha256:
             sha_counts[ph.sha256] = sha_counts.get(ph.sha256, 0) + 1
 
     photos_out = []
     for ph in photos:
-        is_dup = bool(ph.sha256 and sha_counts.get(ph.sha256, 0) > 1)
         photos_out.append({
             "id": ph.id,
             "image_url": ph.image_url,
-            "sha256": getattr(ph, "sha256", None),
+            "sha256": ph.sha256,
             "captured_at": ph.captured_at,
             "lat": ph.lat,
             "lng": ph.lng,
-            "is_duplicate": is_dup,
+            "is_duplicate": bool(ph.sha256 and sha_counts.get(ph.sha256, 0) > 1),
         })
 
-    # Return dict matching SessionDetailOut
     return {
         "id": session.id,
         "activity_type_id": session.activity_type_id,
@@ -329,7 +303,7 @@ async def get_student_session_detail(db, student_id: int, session_id: int):
         "started_at": session.started_at,
         "expires_at": session.expires_at,
         "submitted_at": session.submitted_at,
-        "status": session.status,
+        "status": session.status.value,
         "duration_hours": session.duration_hours,
         "flag_reason": session.flag_reason,
         "photos": photos_out,

@@ -63,7 +63,9 @@ class PhotoOut(BaseModel):
     captured_at: datetime
     lat: float
     lng: float
-    is_duplicate: bool
+
+    # IMPORTANT: default so Pydantic won't require ORM attribute
+    is_duplicate: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
