@@ -182,7 +182,8 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status not in (ActivitySessionStatus.DRAFT, ActivitySessionStatus.IN_PROGRESS):
+    # ✅ only DRAFT sessions can accept uploads
+    if session.status != ActivitySessionStatus.DRAFT:
         raise HTTPException(status_code=400, detail="Cannot upload photos after submission")
 
     now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
@@ -190,7 +191,6 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
         session.status = ActivitySessionStatus.EXPIRED
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
-
 
 # ─────────────────────────────────────────────────────────────
 # Student - Activity
@@ -240,14 +240,12 @@ async def create_activity_session_from_event(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # validate event exists & active
     r = await db.execute(select(Event).where(Event.id == event_id, Event.is_active == True))
     ev = r.scalar_one_or_none()
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found or inactive")
 
-    # IMPORTANT: this MUST exist in activity_types table
-    EVENT_ACTIVITY_TYPE_ID = 1
+    EVENT_ACTIVITY_TYPE_ID = 6  # ✅ Event Activity
 
     s = await create_session(
         db,
