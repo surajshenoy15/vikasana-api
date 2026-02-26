@@ -1,26 +1,32 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
 from app.core.activity_storage import upload_activity_image
-from app.schemas.events import ThumbnailUploadUrlIn, ThumbnailUploadUrlOut
-from app.controllers.events_controller import get_event_thumbnail_upload_url
-from sqlalchemy import select
+
 from app.models.activity_session import ActivitySession
 
 from app.schemas.events import (
-    EventCreateIn, EventOut,
-    RegisterOut, PhotoOut,
-    FinalSubmitIn, SubmissionOut,
-    AdminSubmissionOut, RejectIn
+    EventCreateIn,
+    EventOut,
+    RegisterOut,
+    PhotoOut,
+    FinalSubmitIn,
+    SubmissionOut,
+    AdminSubmissionOut,
+    RejectIn,
+    ThumbnailUploadUrlIn,
+    ThumbnailUploadUrlOut,
+    PhotosUploadOut,  # ✅ REQUIRED (fixes NameError)
 )
 
 from app.controllers.events_controller import (
     create_event,
-    delete_event,           # ← added
+    delete_event,
     list_active_events,
     register_for_event,
     add_photo,
@@ -28,6 +34,7 @@ from app.controllers.events_controller import (
     list_event_submissions,
     approve_submission,
     reject_submission,
+    get_event_thumbnail_upload_url,
 )
 
 router = APIRouter(tags=["Events"])
@@ -44,9 +51,7 @@ async def admin_create_event_api(
     return await create_event(db, payload)
 
 
-# ⚠️  IMPORTANT: /admin/events/thumbnail-upload-url MUST come BEFORE
-#    /admin/events/{event_id} — otherwise FastAPI matches "thumbnail-upload-url"
-#    as the event_id path param and routing breaks.
+# ⚠️ IMPORTANT: keep this BEFORE /admin/events/{event_id}
 @router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
 async def admin_event_thumbnail_upload_url(
     payload: ThumbnailUploadUrlIn,
@@ -111,7 +116,7 @@ async def upload_photos(
     if not session:
         raise HTTPException(status_code=404, detail="Submission/Session not found for this student")
 
-    results: List[PhotoOut] = []
+    results = []
     seq_no = start_seq
 
     for img in images:
@@ -125,12 +130,12 @@ async def upload_photos(
             content_type=img.content_type or "application/octet-stream",
             filename=img.filename or f"photo_{seq_no}.jpg",
             student_id=student.id,
-            session_id=session.id,  # ✅ real ActivitySession id
+            session_id=session.id,
         )
 
         photo = await add_photo(
             db=db,
-            submission_id=session.id,  # ✅ keep consistent
+            submission_id=session.id,
             student_id=student.id,
             seq_no=seq_no,
             image_url=image_url,
@@ -139,10 +144,12 @@ async def upload_photos(
         results.append(photo)
         seq_no += 1
 
-    return {
-        "session_id": session.id,  # ✅ frontend will use this for /face/verify-session
-        "photos": results,
-    }
+    # ✅ Return strongly-typed response
+    return PhotosUploadOut(
+        session_id=session.id,   # frontend should use this in /face/verify-session/{session_id}
+        photos=results,
+    )
+
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
 async def submit_event(
