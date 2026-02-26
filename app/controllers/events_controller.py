@@ -1,15 +1,55 @@
-from datetime import datetime
-from sqlalchemy import select, func
+# app/controllers/events_controller.py  ✅ FULL UPDATED
+# - Fix: block tomorrow/future events from being REGISTERED/STARTED today
+# - Fix: enforce event window (IST) for register, add_photo, final_submit
+# - Keeps: list_active_events returns upcoming (>= today)
+# - NOTE: This controller assumes EventSubmission represents the student's "submission/session" for an event.
+
+from __future__ import annotations
+
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import select, func, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
-from sqlalchemy import select, delete as sql_delete
-from datetime import date
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
-
 from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+
+
+# =========================================================
+# Time helpers (IST)
+# =========================================================
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def _ensure_event_window(event: Event) -> None:
+    """
+    Enforces: event can be accessed ONLY on the event day,
+    and (optionally) within start_time/end_time if configured.
+    """
+    now = _now_ist()
+
+    if not event.event_date:
+        raise HTTPException(status_code=400, detail="Event date not configured.")
+
+    # must be the same day
+    if event.event_date != now.date():
+        raise HTTPException(status_code=403, detail="Event is not available today.")
+
+    # must be within time window if provided
+    if event.start_time and now.time() < event.start_time:
+        raise HTTPException(status_code=403, detail="Event has not started yet.")
+
+    if event.end_time and now.time() > event.end_time:
+        raise HTTPException(status_code=403, detail="Event has ended.")
 
 
 async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
@@ -18,6 +58,7 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
         content_type=content_type,
         admin_id=admin_id,
     )
+
 
 # =========================================================
 # ---------------------- ADMIN -----------------------------
@@ -30,7 +71,7 @@ async def create_event(db: AsyncSession, payload):
         required_photos=payload.required_photos,
         is_active=True,
 
-        # ✅ SAVE THESE
+        # ✅ schedule
         event_date=getattr(payload, "event_date", None),
         start_time=getattr(payload, "start_time", None),
         end_time=getattr(payload, "end_time", None),
@@ -47,33 +88,26 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     """
     Hard-delete an event and all its submissions + photos.
     """
-    # 1. Check event exists
     result = await db.execute(select(Event).where(Event.id == event_id))
     event = result.scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # 2. Get all submission IDs for this event
     sub_result = await db.execute(
         select(EventSubmission.id).where(EventSubmission.event_id == event_id)
     )
     submission_ids = [row[0] for row in sub_result.fetchall()]
 
     if submission_ids:
-        # 2a. Delete all photos for those submissions
         await db.execute(
             sql_delete(EventSubmissionPhoto).where(
                 EventSubmissionPhoto.submission_id.in_(submission_ids)
             )
         )
-        # 2b. Delete all submissions for this event
         await db.execute(
-            sql_delete(EventSubmission).where(
-                EventSubmission.event_id == event_id
-            )
+            sql_delete(EventSubmission).where(EventSubmission.event_id == event_id)
         )
 
-    # 3. Delete the event itself
     await db.execute(sql_delete(Event).where(Event.id == event_id))
     await db.commit()
 
@@ -132,23 +166,39 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
+    """
+    Returns active events from today onwards (upcoming + today).
+    UI can show Upcoming/Ongoing/Past by comparing dates.
+    """
     today = date.today()
     q = await db.execute(
         select(Event).where(
             Event.is_active == True,
             Event.event_date != None,
             Event.event_date >= today
-        ).order_by(Event.event_date.asc(), Event.start_time.asc().nulls_last(), Event.id.desc())
+        ).order_by(
+            Event.event_date.asc(),
+            Event.start_time.asc().nulls_last(),
+            Event.id.desc()
+        )
     )
     return q.scalars().all()
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
-    q = await db.execute(select(Event).where(Event.id == event_id))
+    """
+    IMPORTANT CHANGE:
+    - Registration is allowed ONLY when the event is available today (and within start/end time if set).
+    This prevents tomorrow's event from being started today.
+    """
+    q = await db.execute(select(Event).where(Event.id == event_id, Event.is_active == True))
     event = q.scalar_one_or_none()
 
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # ✅ BLOCK future events (tomorrow etc.)
+    _ensure_event_window(event)
 
     q = await db.execute(
         select(EventSubmission).where(
@@ -185,6 +235,10 @@ async def add_photo(
     seq_no: int,
     image_url: str,
 ):
+    """
+    Adds/updates a photo for an EventSubmission.
+    ✅ Now enforces event window (prevents uploading before event day/time)
+    """
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
@@ -198,6 +252,13 @@ async def add_photo(
 
     if submission.status != "in_progress":
         raise HTTPException(status_code=400, detail="Submission already completed")
+
+    # ✅ fetch event and block if not within allowed window
+    evq = await db.execute(select(Event).where(Event.id == submission.event_id))
+    event = evq.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    _ensure_event_window(event)
 
     q = await db.execute(select(Event.required_photos).where(Event.id == submission.event_id))
     required_photos = q.scalar_one()
@@ -245,6 +306,9 @@ async def final_submit(
     student_id: int,
     description: str
 ):
+    """
+    ✅ Now enforces event window (prevents submitting before event day/time)
+    """
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
@@ -259,6 +323,13 @@ async def final_submit(
     if submission.status != "in_progress":
         raise HTTPException(status_code=400, detail="Already submitted")
 
+    # ✅ fetch event and block if not within allowed window
+    evq = await db.execute(select(Event).where(Event.id == submission.event_id))
+    event = evq.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    _ensure_event_window(event)
+
     q = await db.execute(select(Event.required_photos).where(Event.id == submission.event_id))
     required_photos = q.scalar_one()
 
@@ -272,8 +343,10 @@ async def final_submit(
     if uploaded_photos < required_photos:
         raise HTTPException(
             status_code=400,
-            detail=f"You must upload at least {required_photos} photos before submitting. "
-                   f"Currently uploaded: {uploaded_photos}"
+            detail=(
+                f"You must upload at least {required_photos} photos before submitting. "
+                f"Currently uploaded: {uploaded_photos}"
+            )
         )
 
     submission.status = "submitted"
