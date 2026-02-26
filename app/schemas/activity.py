@@ -59,13 +59,13 @@ class PhotoMetaIn(BaseModel):
 class PhotoOut(BaseModel):
     id: int
     image_url: str
-    sha256: Optional[str] = None
+    sha256: str | None = None
     captured_at: datetime
     lat: float
     lng: float
     is_duplicate: bool
-    class Config:
-        from_attributes = True
+
+    model_config = ConfigDict(from_attributes=True)
 
 class SubmitSessionOut(BaseModel):
     session: SessionOut

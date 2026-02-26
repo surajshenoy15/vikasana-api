@@ -289,10 +289,48 @@ async def list_student_sessions(db, student_id: int):
 async def get_student_session_detail(db, student_id: int, session_id: int):
     res = await db.execute(
         select(ActivitySession)
-        .where(ActivitySession.id == session_id, ActivitySession.student_id == student_id)
+        .where(
+            ActivitySession.id == session_id,
+            ActivitySession.student_id == student_id
+        )
         .options(selectinload(ActivitySession.photos))
     )
     session = res.scalar_one_or_none()
     if not session:
-        raise ValueError("Session not found")
-    return session
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    photos = list(session.photos or [])
+
+    # compute duplicates within THIS session using sha256
+    sha_counts = {}
+    for ph in photos:
+        if getattr(ph, "sha256", None):
+            sha_counts[ph.sha256] = sha_counts.get(ph.sha256, 0) + 1
+
+    photos_out = []
+    for ph in photos:
+        is_dup = bool(ph.sha256 and sha_counts.get(ph.sha256, 0) > 1)
+        photos_out.append({
+            "id": ph.id,
+            "image_url": ph.image_url,
+            "sha256": getattr(ph, "sha256", None),
+            "captured_at": ph.captured_at,
+            "lat": ph.lat,
+            "lng": ph.lng,
+            "is_duplicate": is_dup,
+        })
+
+    # Return dict matching SessionDetailOut
+    return {
+        "id": session.id,
+        "activity_type_id": session.activity_type_id,
+        "activity_name": session.activity_name,
+        "description": session.description,
+        "started_at": session.started_at,
+        "expires_at": session.expires_at,
+        "submitted_at": session.submitted_at,
+        "status": session.status,
+        "duration_hours": session.duration_hours,
+        "flag_reason": session.flag_reason,
+        "photos": photos_out,
+    }
