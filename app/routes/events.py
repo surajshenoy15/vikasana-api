@@ -1,6 +1,13 @@
+# =========================================================
+# app/routes/events.py  ✅ FULL UPDATED
+# - Fixes: stores into activity_photos
+# - Fixes: requires lat/lng per image (activity_photos columns are NOT NULL)
+# - Fixes: PhotoOut/PhotosUploadOut now matches ActivityPhoto
+# =========================================================
 from typing import List
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -9,19 +16,20 @@ from app.core.dependencies import get_current_student, get_current_admin
 from app.core.activity_storage import upload_activity_image
 
 from app.models.activity_session import ActivitySession
+from app.models.activity_photo import ActivityPhoto
 
 from app.schemas.events import (
     EventCreateIn,
     EventOut,
     RegisterOut,
     PhotoOut,
+    PhotosUploadOut,
     FinalSubmitIn,
     SubmissionOut,
     AdminSubmissionOut,
     RejectIn,
     ThumbnailUploadUrlIn,
     ThumbnailUploadUrlOut,
-    PhotosUploadOut,  # ✅ REQUIRED (fixes NameError)
 )
 
 from app.controllers.events_controller import (
@@ -29,7 +37,6 @@ from app.controllers.events_controller import (
     delete_event,
     list_active_events,
     register_for_event,
-    add_photo,
     final_submit,
     list_event_submissions,
     approve_submission,
@@ -71,7 +78,6 @@ async def admin_delete_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    """Delete an event and all its submissions + photos. Returns 204."""
     await delete_event(db, event_id)
 
 
@@ -94,7 +100,7 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
-# ✅ MULTI UPLOAD
+# ✅ MULTI UPLOAD (writes to activity_photos)
 @router.post(
     "/student/submissions/{submission_id}/photos",
     response_model=PhotosUploadOut,
@@ -103,28 +109,34 @@ async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
     images: List[UploadFile] = File(..., description="Upload multiple files with key 'images'"),
+    lats: List[float] = Form(..., description="Latitude per image (same order as images)"),
+    lngs: List[float] = Form(..., description="Longitude per image (same order as images)"),
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ Validate session/submission exists & belongs to student
-    session_stmt = select(ActivitySession).where(
-        ActivitySession.id == submission_id,
-        ActivitySession.student_id == student.id,
+    # Validate session exists & belongs to student
+    session_res = await db.execute(
+        select(ActivitySession).where(
+            ActivitySession.id == submission_id,
+            ActivitySession.student_id == student.id,
+        )
     )
-    session_res = await db.execute(session_stmt)
     session = session_res.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Submission/Session not found for this student")
 
-    results = []
+    if len(lats) != len(images) or len(lngs) != len(images):
+        raise HTTPException(status_code=422, detail="lats/lngs count must match number of images")
+
+    results: List[ActivityPhoto] = []
     seq_no = start_seq
 
-    for img in images:
+    for idx, img in enumerate(images):
         file_bytes = await img.read()
         if not file_bytes:
             continue
 
-        # ✅ Store in MinIO (keep session_id = ActivitySession.id)
+        # 1) Store image in MinIO
         image_url = await upload_activity_image(
             file_bytes=file_bytes,
             content_type=img.content_type or "application/octet-stream",
@@ -133,20 +145,42 @@ async def upload_photos(
             session_id=session.id,
         )
 
-        photo = await add_photo(
-            db=db,
-            submission_id=session.id,
-            student_id=student.id,
-            seq_no=seq_no,
-            image_url=image_url,
+        # 2) UPSERT into activity_photos by (session_id, seq_no)
+        photo_res = await db.execute(
+            select(ActivityPhoto).where(
+                ActivityPhoto.session_id == session.id,
+                ActivityPhoto.seq_no == seq_no,
+            )
         )
+        existing = photo_res.scalar_one_or_none()
+
+        if existing:
+            existing.image_url = image_url
+            existing.student_id = student.id
+            existing.lat = float(lats[idx])
+            existing.lng = float(lngs[idx])
+            existing.captured_at = datetime.utcnow()
+            photo = existing
+        else:
+            photo = ActivityPhoto(
+                session_id=session.id,
+                student_id=student.id,
+                seq_no=seq_no,
+                image_url=image_url,
+                lat=float(lats[idx]),
+                lng=float(lngs[idx]),
+                captured_at=datetime.utcnow(),
+            )
+            db.add(photo)
+
+        await db.commit()
+        await db.refresh(photo)
 
         results.append(photo)
         seq_no += 1
 
-    # ✅ Return strongly-typed response
     return PhotosUploadOut(
-        session_id=session.id,   # frontend should use this in /face/verify-session/{session_id}
+        session_id=session.id,
         photos=results,
     )
 

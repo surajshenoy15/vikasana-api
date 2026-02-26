@@ -1,9 +1,12 @@
+# =========================================================
+# app/schemas/events.py  ✅ FULL UPDATED
+# =========================================================
 from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import datetime 
-from datetime import date, time
-from typing import List
+from typing import Optional, List
+from datetime import datetime, date, time
 
+
+# ------------------ EVENTS ------------------
 
 class EventCreateIn(BaseModel):
     title: str
@@ -29,29 +32,49 @@ class EventOut(BaseModel):
     class Config:
         from_attributes = True
 
+
 class ThumbnailUploadUrlIn(BaseModel):
     filename: str
     content_type: str
+
 
 class ThumbnailUploadUrlOut(BaseModel):
     upload_url: str
     public_url: str
 
 
+# ------------------ REGISTRATION ------------------
+
 class RegisterOut(BaseModel):
     submission_id: int
     status: str
 
 
+# ------------------ PHOTOS (ActivityPhoto based) ------------------
+# NOTE:
+# Your DB table is activity_photos (needs: student_id, lat, lng, captured_at, seq_no, image_url).
+# So PhotoOut must match ActivityPhoto, not old EventSubmissionPhoto.
+
 class PhotoOut(BaseModel):
     id: int
-    submission_id: int
+    session_id: int
+    student_id: int
     seq_no: int
     image_url: str
+    captured_at: datetime
+    lat: float
+    lng: float
 
     class Config:
         from_attributes = True
 
+
+class PhotosUploadOut(BaseModel):
+    session_id: int
+    photos: List[PhotoOut]
+
+
+# ------------------ SUBMISSION ------------------
 
 class FinalSubmitIn(BaseModel):
     description: str
@@ -66,6 +89,7 @@ class SubmissionOut(BaseModel):
     class Config:
         from_attributes = True
 
+
 class AdminSubmissionOut(BaseModel):
     id: int
     event_id: int
@@ -76,14 +100,15 @@ class AdminSubmissionOut(BaseModel):
     approved_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
 
+    # ✅ ADD THESE
+    face_matched: Optional[bool] = None
+    face_reason: Optional[str] = None
+    cosine_score: Optional[float] = None
+    flag_reason: Optional[str] = None
+
     class Config:
         from_attributes = True
 
 
 class RejectIn(BaseModel):
     reason: str
-
-
-class PhotosUploadOut(BaseModel):
-    session_id: int
-    photos: List[PhotoOut]
