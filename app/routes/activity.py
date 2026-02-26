@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -21,7 +23,6 @@ from app.schemas.activity import (
     ActivityTypeOut,
     RequestActivityTypeIn,
     CreateSessionIn,
-    SessionOut,
     PhotoOut,
     SubmitSessionOut,
     SessionListItemOut,
@@ -41,6 +42,7 @@ from app.controllers.activity_controller import (
 from app.core.activity_storage import upload_activity_image
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
+from app.models.event import Event  # ✅ Event model
 
 
 # NOTE:
@@ -49,6 +51,8 @@ from app.models.activity_session import ActivitySession, ActivitySessionStatus
 #   app.include_router(router, prefix="/api")
 #   app.include_router(admin_router, prefix="/api")
 #   app.include_router(legacy_router, prefix="/api")
+
+# ✅ YOU WERE MISSING THIS ROUTER DEFINITION
 router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
 admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
 legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
@@ -186,22 +190,7 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
         session.status = ActivitySessionStatus.EXPIRED
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
-@router.post("/sessions/init")
-async def create_activity_session_init(
-    activity_type_id: int = Query(..., ge=1),
-    activity_name: str | None = Query(None),
-    description: str | None = Query(None),
-    db: AsyncSession = Depends(get_db),
-    student=Depends(get_current_student),
-):
-    s = await create_session(
-        db,
-        student.id,
-        activity_type_id,
-        activity_name,
-        description,
-    )
-    return {"success": True, "session_id": s.id, "id": s.id, "status": getattr(s, "status", None)}
+
 
 # ─────────────────────────────────────────────────────────────
 # Student - Activity
@@ -234,14 +223,42 @@ async def create_activity_session(
         payload.description,
     )
 
-    # BACKWARD COMPAT: many frontends expect session_id
     return {
         "success": True,
         "session_id": s.id,
         "id": s.id,
         "status": getattr(s, "status", None),
-        "session": s,   # keep full object too (optional)
+        "session": s,
     }
+
+
+# ✅ NEW: Create session from Event (no activity_type fields required from frontend)
+@router.post("/sessions/from-event")
+async def create_activity_session_from_event(
+    event_id: int = Query(..., ge=1),
+    description: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    # validate event exists & active
+    r = await db.execute(select(Event).where(Event.id == event_id, Event.is_active == True))
+    ev = r.scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found or inactive")
+
+    # IMPORTANT: this MUST exist in activity_types table
+    EVENT_ACTIVITY_TYPE_ID = 1
+
+    s = await create_session(
+        db,
+        student.id,
+        EVENT_ACTIVITY_TYPE_ID,
+        ev.title,
+        description,
+    )
+
+    return {"success": True, "session_id": s.id, "id": s.id, "status": getattr(s, "status", None)}
+
 
 async def _handle_photo_upload_and_save(
     *,
@@ -255,15 +272,12 @@ async def _handle_photo_upload_and_save(
     image: UploadFile,
     seq_no: int | None,
 ) -> PhotoOut:
-    # 0) Validate session BEFORE upload (prevents wasted MinIO uploads)
     await _assert_session_uploadable(db, student_id, session_id)
 
-    # 1) Read bytes
     file_bytes = await image.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
 
-    # 2) Upload to MinIO and get URL
     image_url = await upload_activity_image(
         file_bytes=file_bytes,
         content_type=image.content_type or "application/octet-stream",
@@ -272,14 +286,11 @@ async def _handle_photo_upload_and_save(
         session_id=session_id,
     )
 
-    # 3) Parse captured_at (flexible)
     captured_at = parse_captured_at(meta_captured_at)
 
-    # 4) Decide seq_no
     if seq_no is None:
         seq_no = await _next_seq_no(db, session_id)
 
-    # 5) Save photo record
     return await add_photo_to_session(
         db=db,
         student_id=student_id,
@@ -293,19 +304,12 @@ async def _handle_photo_upload_and_save(
     )
 
 
-# IMPORTANT:
-# React Native/Expo sometimes fails on POST redirects (307).
-# So we accept BOTH /photos and /photos/ to eliminate redirect-slash issues.
 @router.post("/sessions/{session_id}/photos", response_model=PhotoOut)
 @router.post("/sessions/{session_id}/photos/", response_model=PhotoOut)
 async def upload_activity_photo(
     session_id: int,
-    seq_no: int | None = Query(
-        None,
-        ge=1,
-        description="Photo sequence number (1..required_photos). If omitted, server auto-assigns next.",
-    ),
-    meta_captured_at: str = Query(..., description="ISO preferred; also accepts DD/MM/YYYY, hh:mm:ss am/pm"),
+    seq_no: int | None = Query(None, ge=1),
+    meta_captured_at: str = Query(...),
     lat: float = Query(...),
     lng: float = Query(...),
     sha256: str | None = Query(None),
@@ -372,8 +376,6 @@ async def admin_list_types(
 
 # ─────────────────────────────────────────────────────────────
 # Legacy compatibility route
-# Frontend expects:
-#   POST /api/student/submissions/{id}/photos?start_seq=1
 # ─────────────────────────────────────────────────────────────
 @legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
 @legacy_router.post("/submissions/{submission_id}/photos/", response_model=PhotoOut)
@@ -443,7 +445,6 @@ async def legacy_upload_submission_photo(
             },
         )
 
-    # Validate session BEFORE upload
     await _assert_session_uploadable(db, student.id, submission_id)
 
     return await _handle_photo_upload_and_save(
