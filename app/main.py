@@ -22,6 +22,7 @@ from app.routes.events import router as events_router
 # activity routers (student + admin)
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
+from app.routes.activity import legacy_router as student_legacy_router
 
 # students routers
 from app.routes.students import (
@@ -90,6 +91,7 @@ app.include_router(student_profile_router, prefix="/api")
 app.include_router(student_auth_router, prefix="/api")
 
 app.include_router(student_activity_router, prefix="/api")
+app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
 # ✅ ADD THIS LINE

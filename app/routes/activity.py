@@ -213,3 +213,33 @@ async def legacy_upload_submission_photo(
         sha256=sha256,
         image=image,
     )
+
+# ------------------------------------------------------------
+# Legacy routes (to support older frontend URLs)
+# ------------------------------------------------------------
+legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
+
+
+@legacy_router.post("/submissions/{submission_id}/photos", response_model=PhotoOut)
+async def legacy_upload_submission_photo(
+    submission_id: int,
+    start_seq: int = Query(1, ge=1),
+    meta_captured_at: str = Query(..., description="ISO datetime with timezone recommended"),
+    lat: float = Query(...),
+    lng: float = Query(...),
+    sha256: str | None = Query(None),
+    image: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    # reuse the existing endpoint logic
+    return await upload_activity_photo(
+        session_id=submission_id,
+        meta_captured_at=meta_captured_at,
+        lat=lat,
+        lng=lng,
+        sha256=sha256,
+        image=image,
+        db=db,
+        student=student,
+    )
