@@ -178,7 +178,7 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.status != ActivitySessionStatus.DRAFT:
+    if session.status not in (ActivitySessionStatus.DRAFT, ActivitySessionStatus.IN_PROGRESS):
         raise HTTPException(status_code=400, detail="Cannot upload photos after submission")
 
     now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
@@ -186,7 +186,22 @@ async def _assert_session_uploadable(db: AsyncSession, student_id: int, session_
         session.status = ActivitySessionStatus.EXPIRED
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
-
+@router.post("/sessions/init")
+async def create_activity_session_init(
+    activity_type_id: int = Query(..., ge=1),
+    activity_name: str | None = Query(None),
+    description: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    s = await create_session(
+        db,
+        student.id,
+        activity_type_id,
+        activity_name,
+        description,
+    )
+    return {"success": True, "session_id": s.id, "id": s.id, "status": getattr(s, "status", None)}
 
 # ─────────────────────────────────────────────────────────────
 # Student - Activity
@@ -205,13 +220,13 @@ async def request_type(
     return await request_new_activity_type(db, payload.name, payload.description)
 
 
-@router.post("/sessions", response_model=SessionOut)
+@router.post("/sessions")
 async def create_activity_session(
     payload: CreateSessionIn,
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    return await create_session(
+    s = await create_session(
         db,
         student.id,
         payload.activity_type_id,
@@ -219,6 +234,14 @@ async def create_activity_session(
         payload.description,
     )
 
+    # BACKWARD COMPAT: many frontends expect session_id
+    return {
+        "success": True,
+        "session_id": s.id,
+        "id": s.id,
+        "status": getattr(s, "status", None),
+        "session": s,   # keep full object too (optional)
+    }
 
 async def _handle_photo_upload_and_save(
     *,
