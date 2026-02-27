@@ -17,7 +17,7 @@ async def admin_end_event(db: AsyncSession, event_id: int):
         raise HTTPException(status_code=404, detail="Event not found")
 
     # Mark event as ended (works even if some fields don't exist)
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()  # ✅ naive datetime (no tzinfo)
 
     # Common patterns — set whichever exists in your model
     if hasattr(ev, "ended_at"):
