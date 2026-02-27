@@ -13,7 +13,8 @@ from app.schemas.activity_type import (
     ActivityTypeOut,
 )
 
-router = APIRouter(prefix="/api/activity-types")
+# ✅ IMPORTANT: no /api here because main.py already adds /api
+router = APIRouter(prefix="/activity-types", tags=["Activity Types"])
 
 
 # ─────────────────────────────────────────────────────────────
@@ -129,13 +130,10 @@ async def update_activity_type(
     # Geofence (allow clearing by sending null)
     if payload.maps_url is not None:
         row.maps_url = payload.maps_url
-
     if payload.target_lat is not None:
         row.target_lat = payload.target_lat
-
     if payload.target_lng is not None:
         row.target_lng = payload.target_lng
-
     if payload.radius_m is not None:
         row.radius_m = payload.radius_m
 
@@ -158,7 +156,6 @@ async def deactivate_activity_type(
     if not row:
         raise HTTPException(status_code=404, detail="Not found")
 
-    # safer than physical delete (events/sessions may reference it)
     row.is_active = False
     await db.commit()
     return {"ok": True}
