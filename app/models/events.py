@@ -1,7 +1,8 @@
-from datetime import datetime
+# app/models/events.py
+from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Text, Boolean,
-    DateTime, ForeignKey, UniqueConstraint,Date, Time
+    DateTime, ForeignKey, UniqueConstraint, Date, Time
 )
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -16,11 +17,18 @@ class Event(Base):
 
     required_photos = Column(Integer, nullable=False, default=3)
     is_active = Column(Boolean, default=True)
+
     event_date = Column(Date, nullable=True)
     start_time = Column(Time, nullable=True)
-    end_time   = Column(DateTime, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    # IMPORTANT:
+    # This is TIMESTAMP WITHOUT TIME ZONE in Postgres by default.
+    # So we store NAIVE datetime in controllers.
+    end_time = Column(DateTime, nullable=True)
+
+    # timezone aware UTC
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
     thumbnail_url = Column(String, nullable=True)
 
     submissions = relationship("EventSubmission", back_populates="event")
@@ -33,10 +41,10 @@ class EventSubmission(Base):
     event_id = Column(Integer, ForeignKey("events.id", ondelete="CASCADE"))
     student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"))
 
-    status = Column(String(30), default="in_progress")  # in_progress/submitted
+    status = Column(String(30), default="in_progress")  # in_progress/submitted/approved/rejected
     description = Column(Text, nullable=True)
 
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     submitted_at = Column(DateTime(timezone=True), nullable=True)
 
     event = relationship("Event", back_populates="submissions")
@@ -56,7 +64,7 @@ class EventSubmissionPhoto(Base):
     seq_no = Column(Integer, nullable=False)
     image_url = Column(Text, nullable=False)
 
-    created_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     submission = relationship("EventSubmission", back_populates="photos")
 

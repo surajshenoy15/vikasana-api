@@ -1,8 +1,7 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
 
-from datetime import datetime
-from datetime import date as date_type
+from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func, delete as sql_delete
@@ -15,46 +14,73 @@ from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 # =========================================================
-# Time helpers (IST)
+# Time helpers (IST) - IMPORTANT:
+# Your DB column events.end_time is TIMESTAMP WITHOUT TIME ZONE,
+# so we ALWAYS store NAIVE datetime (tzinfo=None).
 # =========================================================
 
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def _now_ist() -> datetime:
-    return datetime.now(IST)
+def _now_ist_naive() -> datetime:
+    """IST time but tz stripped → safe for TIMESTAMP WITHOUT TIME ZONE"""
+    return datetime.now(IST).replace(tzinfo=None)
+
+
+def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
+    """
+    Combine event_date + time into a NAIVE datetime that represents IST clock time.
+    Stored as naive in DB, and compared with _now_ist_naive().
+    """
+    return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
 def _ensure_event_window(event: Event) -> None:
     """
     Enforces:
       - event must be active (is_active = True)
-      - accessible ONLY on event_date
+      - accessible ONLY on event_date (IST date)
       - must be within start_time/end_time if configured
-    """
-    now = _now_ist()
 
-    # ✅ block ended/inactive events
+    Notes:
+      - start_time is TIME (safe compare with now.time()).
+      - end_time is DateTime (timestamp without tz) so compare with _now_ist_naive().
+    """
+    now_dt = _now_ist_naive()  # naive datetime (IST clock)
+    now_date = now_dt.date()
+    now_time = now_dt.time()
+
+    # block ended/inactive events
     if not getattr(event, "is_active", True):
         raise HTTPException(status_code=403, detail="Event has ended.")
 
     if not getattr(event, "event_date", None):
         raise HTTPException(status_code=400, detail="Event date not configured.")
 
-    # must be the same day (IST date)
-    if event.event_date != now.date():
+    # must be same day (IST)
+    if event.event_date != now_date:
         raise HTTPException(status_code=403, detail="Event is not available today.")
 
-    # must be within time window if provided
-    if getattr(event, "start_time", None) and now.time() < event.start_time:
+    # start window (TIME)
+    if getattr(event, "start_time", None) and now_time < event.start_time:
         raise HTTPException(status_code=403, detail="Event has not started yet.")
 
-    if getattr(event, "end_time", None) and now.time() > event.end_time:
-        raise HTTPException(status_code=403, detail="Event has ended.")
+    # end window:
+    # - If end_time is datetime (your model), compare now_dt > end_time
+    # - If end_time was ever stored as time (older data), handle safely
+    end_val = getattr(event, "end_time", None)
+    if end_val:
+        if isinstance(end_val, datetime):
+            # end_val is naive datetime in DB
+            if now_dt > end_val:
+                raise HTTPException(status_code=403, detail="Event has ended.")
+        elif isinstance(end_val, time_type):
+            if now_time > end_val:
+                raise HTTPException(status_code=403, detail="Event has ended.")
 
 
 async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
-    # (You may optionally validate content_type here using ALLOWED_IMAGE_TYPES)
+    # (Optional: validate content_type in ALLOWED_IMAGE_TYPES)
     return await generate_event_thumbnail_presigned_put(
         filename=filename,
         content_type=content_type,
@@ -67,15 +93,37 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 
 async def create_event(db: AsyncSession, payload):
+    """
+    Handles payload.end_time being either:
+      - time (preferred from UI), OR
+      - datetime (rare)
+
+    We store end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
+    """
+    event_date = getattr(payload, "event_date", None)
+    start_time = getattr(payload, "start_time", None)
+    end_time_raw = getattr(payload, "end_time", None)
+
+    end_time_dt = None
+    if end_time_raw:
+        if isinstance(end_time_raw, datetime):
+            # If someone sends tz-aware, strip tz to avoid asyncpg error
+            end_time_dt = end_time_raw.replace(tzinfo=None)
+        elif isinstance(end_time_raw, time_type):
+            # Combine event_date + end_time(time) into datetime
+            if not event_date:
+                raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+            end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
+
     event = Event(
         title=payload.title,
         description=payload.description,
         required_photos=int(payload.required_photos or 3),
         is_active=True,
 
-        event_date=getattr(payload, "event_date", None),
-        start_time=getattr(payload, "start_time", None),
-        end_time=getattr(payload, "end_time", None),
+        event_date=event_date,
+        start_time=start_time,
+        end_time=end_time_dt,
 
         thumbnail_url=getattr(payload, "thumbnail_url", None),
     )
@@ -89,7 +137,7 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
     """
     Admin ends event now:
       - is_active = False
-      - end_time = current IST datetime (TIMESTAMP column)
+      - end_time = current IST datetime (NAIVE) to match DB TIMESTAMP WITHOUT TZ
     """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
@@ -102,13 +150,14 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
 
     event.is_active = False
 
-    # IMPORTANT: end_time column is TIMESTAMP
+    # IMPORTANT: DB expects naive datetime (no tzinfo)
     if hasattr(event, "end_time"):
-        event.end_time = _now_ist()  # full datetime
+        event.end_time = _now_ist_naive()
 
     await db.commit()
     await db.refresh(event)
     return event
+
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
     """
@@ -154,7 +203,8 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
-        submission.approved_at = datetime.utcnow()
+        # if your column is timezone=True, prefer aware UTC
+        submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(submission)
@@ -187,7 +237,7 @@ async def list_active_events(db: AsyncSession):
     """
     Returns active events from today onwards (upcoming + today), using IST date.
     """
-    today_ist = _now_ist().date()
+    today_ist = _now_ist_naive().date()
 
     q = await db.execute(
         select(Event).where(
@@ -249,8 +299,7 @@ async def add_photo(
     image_url: str,
 ):
     """
-    Adds/updates a photo for an EventSubmissionPhoto table.
-    Use this only if you want event_submission_photos storage.
+    Adds/updates a photo for EventSubmissionPhoto table.
     """
     q = await db.execute(
         select(EventSubmission).where(
@@ -347,7 +396,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     submission.status = "submitted"
     submission.description = description
     if hasattr(submission, "submitted_at"):
-        submission.submitted_at = datetime.utcnow()
+        submission.submitted_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(submission)
