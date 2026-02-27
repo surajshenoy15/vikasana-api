@@ -1,8 +1,15 @@
+from __future__ import annotations
+
 from datetime import datetime
+from typing import List, TYPE_CHECKING
+
 from sqlalchemy import String, Boolean, DateTime, Text, Index
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.student import Student
 
 
 class Faculty(Base):
@@ -16,21 +23,35 @@ class Faculty(Base):
 
     role: Mapped[str] = mapped_column(String(50), nullable=False, default="faculty")
 
-    # Activation (invite link)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
+
     activation_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     activation_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # ✅ Password (set after OTP verification)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    # Profile
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow
+    )
+
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    # --------------------------------------------------
+    # RELATIONSHIP: Students Created By This Faculty
+    # --------------------------------------------------
+
+    students_created: Mapped[List["Student"]] = relationship(
+        "Student",
+        back_populates="created_by_faculty",
+        cascade="all",
     )
 
     __table_args__ = (

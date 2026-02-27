@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from datetime import datetime
 
 from sqlalchemy import (
@@ -11,11 +13,19 @@ from sqlalchemy import (
     Enum as SAEnum,
     Boolean,
     Index,
+    ForeignKey,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
 from app.core.database import Base
+
+if TYPE_CHECKING:
+    from app.models.faculty import Faculty
+    from app.models.activity_session import ActivitySession
+    from app.models.student_activity_stats import StudentActivityStats
+    from app.models.student_face_embedding import StudentFaceEmbedding
+    from app.models.activity_face_check import ActivityFaceCheck
+    from app.models.activity_photo import ActivityPhoto
 
 
 # --------------------------------------------------
@@ -116,6 +126,24 @@ class Student(Base):
     )
 
     # --------------------------------------------------
+    # CREATED BY (FACULTY)
+    # --------------------------------------------------
+
+    created_by_faculty_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("faculty.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    created_by_faculty: Mapped[Optional["Faculty"]] = relationship(
+        "Faculty",
+        back_populates="students_created",
+        foreign_keys=[created_by_faculty_id],
+        lazy="joined",
+    )
+
+    # --------------------------------------------------
     # RELATIONSHIPS
     # --------------------------------------------------
 
@@ -137,7 +165,6 @@ class Student(Base):
         cascade="all, delete-orphan",
     )
 
-    # ✅ IMPORTANT: Face Checks relationship (needed for verification system)
     face_checks: Mapped[List["ActivityFaceCheck"]] = relationship(
         "ActivityFaceCheck",
         back_populates="student",
@@ -145,7 +172,7 @@ class Student(Base):
     )
 
     activity_photos: Mapped[List["ActivityPhoto"]] = relationship(
-    "ActivityPhoto",
-    back_populates="student",
-    cascade="all, delete-orphan",
-)
+        "ActivityPhoto",
+        back_populates="student",
+        cascade="all, delete-orphan",
+    )
