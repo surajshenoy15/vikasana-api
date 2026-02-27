@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 from datetime import datetime
-
+from app.controllers.activity_points_controller import award_points_for_session
 from fastapi import HTTPException
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -400,19 +400,50 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
 # APPROVE / REJECT
 # ─────────────────────────────────────────────────────────────
 
-async def admin_approve_session(db: AsyncSession, session_id: int) -> ActivitySession:
-    s = await db.get(ActivitySession, session_id)
+
+async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
+    res = await db.execute(
+        select(ActivitySession)
+        .where(ActivitySession.id == session_id)
+        .with_for_update()
+    )
+    s = res.scalar_one_or_none()
+
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+
     if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
         raise HTTPException(status_code=400, detail=f"Cannot approve session in status {s.status}")
 
+    # ✅ Your snippet goes EXACTLY HERE
+    if s.points_processed:
+        s.status = ActivitySessionStatus.APPROVED
+        s.flag_reason = None
+        await db.commit()
+        return {"id": s.id, "status": "APPROVED", "points_awarded_now": 0, "reason": "Already processed"}
+
+    # Approve
     s.status = ActivitySessionStatus.APPROVED
     s.flag_reason = None
+    await db.flush()
+
+    # Award (this function must NOT commit)
+    result = await award_points_for_session(db, s.id)
+
+    # Mark processed after award success
+    s.points_processed = True
+
     await db.commit()
     await db.refresh(s)
-    return s
 
+    return {
+        "id": s.id,
+        "status": s.status.value,
+        "points_awarded_now": result.get("awarded", 0),
+        "duration_minutes": result.get("duration_minutes"),
+        "progress_total_minutes": result.get("total_minutes"),
+        "points_awarded_total_for_activity": result.get("points_awarded_total_for_activity"),
+    }
 
 async def admin_reject_session(db: AsyncSession, session_id: int, reason: str) -> ActivitySession:
     s = await db.get(ActivitySession, session_id)

@@ -99,11 +99,8 @@ async def approve_session(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    s = await admin_approve_session(db=db, session_id=session_id)
-    return {
-        "id": s.id,
-        "status": s.status.value if hasattr(s.status, "value") else str(s.status),
-    }
+    # ✅ admin_approve_session now returns a dict (includes points info)
+    return await admin_approve_session(db=db, session_id=session_id)
 
 
 # ─────────────────────────────────────────────────────────────

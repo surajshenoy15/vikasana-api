@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, func, Index
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float, func, Index, Boolean
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import relationship
 import enum
@@ -48,6 +48,9 @@ class ActivitySession(Base):
     duration_hours = Column(Float, nullable=True)
     flag_reason = Column(String(500), nullable=True)
 
+    # ✅ NEW: prevents double awarding points
+    points_processed = Column(Boolean, nullable=False, default=False, server_default="false")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     # -------------------------
@@ -62,7 +65,6 @@ class ActivitySession(Base):
         cascade="all, delete-orphan",
     )
 
-    # ✅ ADD THIS (Face checks per session)
     face_checks = relationship(
         "ActivityFaceCheck",
         back_populates="session",
