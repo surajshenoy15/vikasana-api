@@ -39,6 +39,9 @@ from app.routes.face_routes import router as face_router
 # ✅ admin sessions router
 from app.routes.admin_sessions import router as admin_sessions_router
 
+# ✅ activity types router (NEW)
+from app.routes.activity_types import router as activity_types_router
+
 
 app = FastAPI(
     title="Vikasana Foundation API",
@@ -47,6 +50,7 @@ app = FastAPI(
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
 )
+
 
 def _sanitize(obj):
     if isinstance(obj, (bytes, bytearray)):
@@ -65,6 +69,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": safe_errors},
     )
+
 
 # ───────────────── CORS ─────────────────
 origins = settings.origins_list or [
@@ -96,8 +101,14 @@ app.include_router(student_activity_router, prefix="/api")
 app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
-# ✅ Admin APIs
+# ✅ Admin Sessions
 app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
+
+# ✅ Activity Types (NEW)
+# Public:  GET  /api/activity-types
+# Admin:   POST /api/activity-types
+#         PATCH/GET/DELETE /api/activity-types/{id}
+app.include_router(activity_types_router, prefix="/api")
 
 # ✅ Events (admin + student)
 # includes: /api/admin/events/{id}/end  and /api/student/events etc
@@ -107,9 +118,11 @@ app.include_router(events_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(face_router, prefix="/api")  # -> /api/face/...
 
+# ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
 async def root():
     return {"status": "ok", "app": "Vikasana Foundation API", "env": settings.APP_ENV}
+
 
 @app.get("/health", tags=["Health"])
 async def health():
