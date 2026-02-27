@@ -25,14 +25,16 @@ router = APIRouter(prefix="/admin/sessions", tags=["Admin - Sessions"])
 # LIST
 # ─────────────────────────────────────────────────────────────
 
+# app/routes/admin_sessions.py
+
 @router.get("")
 async def list_sessions(
     status: Optional[str] = Query(
         None,
         description=(
             "Filter by status. Omit for Queue (SUBMITTED+FLAGGED). "
-            "Use 'All' or pass no value for queue. "
-            "Other values: SUBMITTED | FLAGGED | APPROVED | REJECTED | DRAFT | EXPIRED"
+            "Use 'ALL' for no status filter. "
+            "Other: SUBMITTED | FLAGGED | APPROVED | REJECTED | DRAFT | EXPIRED"
         ),
     ),
     q: Optional[str] = Query(None, description="Search by activity name or session code"),
@@ -41,25 +43,23 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    """
-    Returns enriched session list with:
-    - Student name / USN / college
-    - in_time / out_time (from photo timestamps)
-    - Face check summary + presigned processed image URL
-    - total_activity_points
-    """
     parsed_status: Optional[ActivitySessionStatus] = None
+    include_all = False  # ✅ NEW
 
-    # "All" means no status filter
-    if status and status.upper() != "ALL":
-        try:
-            parsed_status = ActivitySessionStatus(status.upper())
-        except ValueError:
-            parsed_status = None  # ignore unknown -> default queue
+    if status:
+        s = status.upper().strip()
+        if s == "ALL":
+            include_all = True  # ✅ means NO FILTER
+        else:
+            try:
+                parsed_status = ActivitySessionStatus(s)
+            except ValueError:
+                parsed_status = None  # invalid -> fallback queue
 
     return await admin_list_sessions(
         db=db,
         status=parsed_status,
+        include_all=include_all,  # ✅ NEW
         q=q,
         limit=limit,
         offset=offset,

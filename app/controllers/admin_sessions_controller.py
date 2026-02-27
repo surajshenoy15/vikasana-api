@@ -2,27 +2,24 @@
 from __future__ import annotations
 
 from typing import Optional
-from datetime import datetime
-from app.controllers.activity_points_controller import award_points_for_session
 from fastapi import HTTPException
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.activity_session import ActivitySession, ActivitySessionStatus
-from app.models.activity_photo import ActivityPhoto
-from app.models.activity_type import ActivityType
+from app.controllers.activity_points_controller import award_points_for_session
+from app.core.config import settings
 from app.models.activity_face_check import ActivityFaceCheck
+from app.models.activity_photo import ActivityPhoto
+from app.models.activity_session import ActivitySession, ActivitySessionStatus
+from app.models.activity_type import ActivityType
 from app.models.student import Student
-from app.models.student_face_embedding import StudentFaceEmbedding
 
-# MinIO presigned URL helper
 import anyio
 from minio import Minio
-from app.core.config import settings
 
 # ─────────────────────────────────────────────────────────────
-# MinIO client (reuse pattern from face.py)
+# MinIO client
 # ─────────────────────────────────────────────────────────────
 
 _minio = Minio(
@@ -32,7 +29,7 @@ _minio = Minio(
     secure=settings.MINIO_SECURE,
 )
 
-_PRESIGN_EXPIRY = 3600  # 1 hour in seconds
+_PRESIGN_EXPIRY = 3600  # 1 hour
 
 
 def _extract_object_key(url: str, bucket: str) -> str:
@@ -43,17 +40,20 @@ def _extract_object_key(url: str, bucket: str) -> str:
     if "://" in s:
         s = s.split("://", 1)[1].split("/", 1)[-1]  # remove host
     if s.startswith(bucket + "/"):
-        s = s[len(bucket) + 1:]
+        s = s[len(bucket) + 1 :]
     return s
 
 
 async def _presign(bucket: str, key: str) -> Optional[str]:
-    """Return a presigned GET URL valid for _PRESIGN_EXPIRY seconds."""
     if not key:
         return None
     try:
         url = await anyio.to_thread.run_sync(
-            lambda: _minio.presigned_get_object(bucket, key, expires=__import__("datetime").timedelta(seconds=_PRESIGN_EXPIRY))
+            lambda: _minio.presigned_get_object(
+                bucket,
+                key,
+                expires=__import__("datetime").timedelta(seconds=_PRESIGN_EXPIRY),
+            )
         )
         return url
     except Exception:
@@ -76,10 +76,8 @@ async def _presign_face(obj: str) -> Optional[str]:
 
 def _calc_session_points(activity_type: Optional[ActivityType], duration_hours: Optional[float]) -> int:
     """
-    Simple formula mirroring your ActivityType model:
-      units = floor(duration_hours / hours_per_unit)
-      points = min(units * points_per_unit, max_points)
-    Falls back to 0 if data missing.
+    units = floor(duration_hours / hours_per_unit)
+    points = min(units * points_per_unit, max_points)
     """
     if not activity_type or not duration_hours:
         return 0
@@ -94,41 +92,40 @@ def _calc_session_points(activity_type: Optional[ActivityType], duration_hours: 
 
 
 # ─────────────────────────────────────────────────────────────
-# LIST sessions  (admin queue / all / filtered)
+# LIST sessions (Queue / ALL / filtered)
 # ─────────────────────────────────────────────────────────────
 
 async def admin_list_sessions(
     db: AsyncSession,
     status: Optional[ActivitySessionStatus] = None,
+    include_all: bool = False,  # ✅ NEW to match route
     q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
     """
-    Returns enriched list rows including:
-    - student name / usn / college (joined)
-    - latest face check summary + presigned processed image URL
-    - in_time / out_time derived from photos
-    - photo count
-    - activity points
+    Behavior must match routes:
+
+    - If include_all=True  -> NO status filter (returns everything)
+    - Else if status is None -> Queue (SUBMITTED + FLAGGED)
+    - Else -> exact status filter
     """
     stmt = (
         select(ActivitySession)
-        .options(
-            selectinload(ActivitySession.photos),
-        )
+        .options(selectinload(ActivitySession.photos))
         .order_by(ActivitySession.submitted_at.desc().nulls_last(), ActivitySession.id.desc())
         .limit(limit)
         .offset(offset)
     )
 
-    # Default: "Queue" = SUBMITTED + FLAGGED
-    if status is None:
-        stmt = stmt.where(
-            ActivitySession.status.in_([ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED])
-        )
-    else:
-        stmt = stmt.where(ActivitySession.status == status)
+    # ✅ status filtering logic exactly per routes
+    if not include_all:
+        if status is None:
+            stmt = stmt.where(
+                ActivitySession.status.in_([ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED])
+            )
+        else:
+            stmt = stmt.where(ActivitySession.status == status)
 
     if q and q.strip():
         like = f"%{q.strip()}%"
@@ -141,7 +138,6 @@ async def admin_list_sessions(
 
     res = await db.execute(stmt)
     sessions = res.scalars().all()
-
     if not sessions:
         return []
 
@@ -165,7 +161,6 @@ async def admin_list_sessions(
     session_ids = [s.id for s in sessions]
     face_checks: dict[int, ActivityFaceCheck] = {}
     if session_ids:
-        # Get the most recent face check per session
         subq = (
             select(
                 ActivityFaceCheck.session_id,
@@ -185,8 +180,7 @@ async def admin_list_sessions(
         for fc in fcr.scalars().all():
             face_checks[fc.session_id] = fc
 
-    # Build rows
-    rows = []
+    rows: list[dict] = []
     for s in sessions:
         st = students.get(s.student_id)
         at = activity_types.get(s.activity_type_id)
@@ -199,53 +193,55 @@ async def admin_list_sessions(
 
         points = _calc_session_points(at, s.duration_hours)
 
-        # Presign face processed image
         face_processed_url = None
         if fc and fc.processed_object:
             face_processed_url = await _presign_face(fc.processed_object)
 
-        rows.append({
-            "id": s.id,
-            "student_id": s.student_id,
-            "student_name": st.name if st else None,
-            "usn": st.usn if st else None,
-            "college": st.college if st else None,
-            "activity_type_id": s.activity_type_id,
-            "activity_name": s.activity_name,
-            "description": s.description,
-            "status": s.status.value if hasattr(s.status, "value") else str(s.status),
-            "started_at": s.started_at,
-            "submitted_at": s.submitted_at,
-            "expires_at": s.expires_at,
-            "duration_hours": s.duration_hours,
-            "flag_reason": s.flag_reason,
-            "photos_count": len(photos),
-            # Derived timing from photos
-            "in_time": in_time,
-            "out_time": out_time,
-            # Activity points
-            "total_activity_points": points,
-            "activity_type": {
-                "id": at.id,
-                "name": at.name,
-                "points_per_unit": at.points_per_unit,
-                "max_points": at.max_points,
-                "hours_per_unit": at.hours_per_unit,
-            } if at else None,
-            # Face summary
-            "latest_face_matched": fc.matched if fc else None,
-            "latest_face_reason": fc.reason if fc else None,
-            "latest_face_processed_url": face_processed_url,
-            "latest_face_check": {
-                "id": fc.id,
-                "matched": fc.matched,
-                "cosine_score": fc.cosine_score,
-                "l2_score": fc.l2_score,
-                "total_faces": fc.total_faces,
-                "reason": fc.reason,
-                "processed_object": fc.processed_object,
-            } if fc else None,
-        })
+        rows.append(
+            {
+                "id": s.id,
+                "student_id": s.student_id,
+                "student_name": st.name if st else None,
+                "usn": st.usn if st else None,
+                "college": st.college if st else None,
+                "activity_type_id": s.activity_type_id,
+                "activity_name": s.activity_name,
+                "description": s.description,
+                "status": s.status.value if hasattr(s.status, "value") else str(s.status),
+                "started_at": s.started_at,
+                "submitted_at": s.submitted_at,
+                "expires_at": s.expires_at,
+                "duration_hours": s.duration_hours,
+                "flag_reason": s.flag_reason,
+                "photos_count": len(photos),
+                "in_time": in_time,
+                "out_time": out_time,
+                "total_activity_points": points,
+                "activity_type": {
+                    "id": at.id,
+                    "name": at.name,
+                    "points_per_unit": at.points_per_unit,
+                    "max_points": at.max_points,
+                    "hours_per_unit": at.hours_per_unit,
+                }
+                if at
+                else None,
+                "latest_face_matched": fc.matched if fc else None,
+                "latest_face_reason": fc.reason if fc else None,
+                "latest_face_processed_url": face_processed_url,
+                "latest_face_check": {
+                    "id": fc.id,
+                    "matched": fc.matched,
+                    "cosine_score": fc.cosine_score,
+                    "l2_score": fc.l2_score,
+                    "total_faces": fc.total_faces,
+                    "reason": fc.reason,
+                    "processed_object": fc.processed_object,
+                }
+                if fc
+                else None,
+            }
+        )
 
     return rows
 
@@ -267,7 +263,6 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
     st = await db.get(Student, s.student_id)
     at = await db.get(ActivityType, s.activity_type_id)
 
-    # All face checks for this session (ordered)
     fcr = await db.execute(
         select(ActivityFaceCheck)
         .where(ActivityFaceCheck.session_id == session_id)
@@ -283,39 +278,37 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
 
     points = _calc_session_points(at, s.duration_hours)
 
-    # Presign face processed image
     face_processed_url = None
     if latest_fc and latest_fc.processed_object:
         face_processed_url = await _presign_face(latest_fc.processed_object)
 
-    # Build photo details with presigned URLs + geo info
     photos_out = []
     for p in sorted(photos, key=lambda x: x.seq_no or 0):
         presigned = await _presign_activity(p.image_url)
-        # Find face check for this photo
+
         ph_fc = next((fc for fc in all_face_checks if fc.photo_id == p.id), None)
         ph_face_url = None
         if ph_fc and ph_fc.processed_object:
             ph_face_url = await _presign_face(ph_fc.processed_object)
 
-        photos_out.append({
-            "id": p.id,
-            "seq_no": p.seq_no,
-            "image_url": presigned or p.image_url,
-            "captured_at": p.captured_at,
-            "lat": p.lat,
-            "lng": p.lng,
-            "distance_m": getattr(p, "distance_m", None),
-            "is_in_geofence": bool(getattr(p, "is_in_geofence", True)),
-            "geo_flag_reason": getattr(p, "geo_flag_reason", None),
-            "sha256": getattr(p, "sha256", None),
-            # Per-photo face info
-            "face_matched": ph_fc.matched if ph_fc else None,
-            "face_reason": ph_fc.reason if ph_fc else None,
-            "face_processed_url": ph_face_url,
-        })
+        photos_out.append(
+            {
+                "id": p.id,
+                "seq_no": p.seq_no,
+                "image_url": presigned or p.image_url,
+                "captured_at": p.captured_at,
+                "lat": p.lat,
+                "lng": p.lng,
+                "distance_m": getattr(p, "distance_m", None),
+                "is_in_geofence": bool(getattr(p, "is_in_geofence", True)),
+                "geo_flag_reason": getattr(p, "geo_flag_reason", None),
+                "sha256": getattr(p, "sha256", None),
+                "face_matched": ph_fc.matched if ph_fc else None,
+                "face_reason": ph_fc.reason if ph_fc else None,
+                "face_processed_url": ph_face_url,
+            }
+        )
 
-    # Location trail: all unique lat/lng points ordered by capture time
     location_trail = [
         {
             "seq_no": p["seq_no"],
@@ -336,23 +329,17 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
         "usn": st.usn if st else None,
         "college": st.college if st else None,
         "face_enrolled": st.face_enrolled if st else None,
-
         "activity_type_id": s.activity_type_id,
         "activity_name": s.activity_name,
         "description": s.description,
         "status": s.status.value if hasattr(s.status, "value") else str(s.status),
         "flag_reason": s.flag_reason,
-
         "started_at": s.started_at,
         "submitted_at": s.submitted_at,
         "expires_at": s.expires_at,
         "duration_hours": s.duration_hours,
-
-        # ✅ In/Out time from photo timestamps
         "in_time": in_time,
         "out_time": out_time,
-
-        # ✅ Activity type + points
         "activity_type": {
             "id": at.id,
             "name": at.name,
@@ -363,10 +350,10 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
             "target_lng": getattr(at, "target_lng", None),
             "radius_m": getattr(at, "radius_m", 500),
             "maps_url": getattr(at, "maps_url", None),
-        } if at else None,
+        }
+        if at
+        else None,
         "total_activity_points": points,
-
-        # ✅ Face verification
         "latest_face_matched": latest_fc.matched if latest_fc else None,
         "latest_face_reason": latest_fc.reason if latest_fc else None,
         "latest_face_processed_url": face_processed_url,
@@ -378,21 +365,19 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
             "total_faces": latest_fc.total_faces,
             "reason": latest_fc.reason,
             "processed_object": latest_fc.processed_object,
-        } if latest_fc else None,
-
-        # ✅ Photos with presigned URLs + per-photo face info
+        }
+        if latest_fc
+        else None,
         "photos": photos_out,
-
-        # ✅ Location trail
         "location_trail": location_trail,
-
-        # Target location from activity type
         "target_location": {
             "maps_url": getattr(at, "maps_url", None),
             "target_lat": getattr(at, "target_lat", None),
             "target_lng": getattr(at, "target_lng", None),
             "radius_m": int(getattr(at, "radius_m", 500) or 500),
-        } if at else None,
+        }
+        if at
+        else None,
     }
 
 
@@ -400,39 +385,37 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
 # APPROVE / REJECT
 # ─────────────────────────────────────────────────────────────
 
-
 async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
     res = await db.execute(
-        select(ActivitySession)
-        .where(ActivitySession.id == session_id)
-        .with_for_update()
+        select(ActivitySession).where(ActivitySession.id == session_id).with_for_update()
     )
     s = res.scalar_one_or_none()
-
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
     if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
         raise HTTPException(status_code=400, detail=f"Cannot approve session in status {s.status}")
 
-    # ✅ Your snippet goes EXACTLY HERE
-    if s.points_processed:
+    # ✅ idempotent points award
+    if getattr(s, "points_processed", False):
         s.status = ActivitySessionStatus.APPROVED
         s.flag_reason = None
         await db.commit()
-        return {"id": s.id, "status": "APPROVED", "points_awarded_now": 0, "reason": "Already processed"}
+        return {
+            "id": s.id,
+            "status": "APPROVED",
+            "points_awarded_now": 0,
+            "reason": "Already processed",
+        }
 
-    # Approve
     s.status = ActivitySessionStatus.APPROVED
     s.flag_reason = None
     await db.flush()
 
-    # Award (this function must NOT commit)
+    # Award (must NOT commit inside)
     result = await award_points_for_session(db, s.id)
 
-    # Mark processed after award success
     s.points_processed = True
-
     await db.commit()
     await db.refresh(s)
 
@@ -445,10 +428,12 @@ async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
         "points_awarded_total_for_activity": result.get("points_awarded_total_for_activity"),
     }
 
+
 async def admin_reject_session(db: AsyncSession, session_id: int, reason: str) -> ActivitySession:
     s = await db.get(ActivitySession, session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
+
     if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
         raise HTTPException(status_code=400, detail=f"Cannot reject session in status {s.status}")
 
