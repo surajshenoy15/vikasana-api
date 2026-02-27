@@ -1,9 +1,4 @@
-# app/controllers/events_controller.py  ✅ FULL UPDATED
-# - Fix: block tomorrow/future events from being REGISTERED/STARTED today
-# - Fix: enforce event window (IST) for register, add_photo, final_submit
-# - Keeps: list_active_events returns upcoming (>= today)
-# - NOTE: This controller assumes EventSubmission represents the student's "submission/session" for an event.
-
+# app/controllers/events_controller.py  ✅ FULL UPDATED (FINAL)
 from __future__ import annotations
 
 from datetime import datetime, date
@@ -18,7 +13,6 @@ from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
-
 # =========================================================
 # Time helpers (IST)
 # =========================================================
@@ -32,10 +26,16 @@ def _now_ist() -> datetime:
 
 def _ensure_event_window(event: Event) -> None:
     """
-    Enforces: event can be accessed ONLY on the event day,
-    and (optionally) within start_time/end_time if configured.
+    Enforces:
+      - event must be active (is_active = True)
+      - accessible ONLY on event_date
+      - must be within start_time/end_time if configured
     """
     now = _now_ist()
+
+    # ✅ block ended/inactive events
+    if not getattr(event, "is_active", True):
+        raise HTTPException(status_code=403, detail="Event has ended.")
 
     if not event.event_date:
         raise HTTPException(status_code=400, detail="Event date not configured.")
@@ -68,10 +68,9 @@ async def create_event(db: AsyncSession, payload):
     event = Event(
         title=payload.title,
         description=payload.description,
-        required_photos=payload.required_photos,
+        required_photos=int(payload.required_photos or 3),
         is_active=True,
 
-        # ✅ schedule
         event_date=getattr(payload, "event_date", None),
         start_time=getattr(payload, "start_time", None),
         end_time=getattr(payload, "end_time", None),
@@ -79,6 +78,28 @@ async def create_event(db: AsyncSession, payload):
         thumbnail_url=getattr(payload, "thumbnail_url", None),
     )
     db.add(event)
+    await db.commit()
+    await db.refresh(event)
+    return event
+
+
+async def end_event(db: AsyncSession, event_id: int) -> Event:
+    """
+    ✅ Admin ends event now:
+      - is_active = False
+      - end_time = current IST time (TIME column in DB)
+    """
+    q = await db.execute(select(Event).where(Event.id == event_id))
+    event = q.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    if event.is_active is False:
+        return event  # already ended
+
+    event.is_active = False
+    event.end_time = _now_ist().time()
+
     await db.commit()
     await db.refresh(event)
     return event
@@ -113,18 +134,13 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
-    q = await db.execute(
-        select(EventSubmission).where(EventSubmission.event_id == event_id)
-    )
+    q = await db.execute(select(EventSubmission).where(EventSubmission.event_id == event_id))
     return q.scalars().all()
 
 
 async def approve_submission(db: AsyncSession, submission_id: int):
-    q = await db.execute(
-        select(EventSubmission).where(EventSubmission.id == submission_id)
-    )
+    q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
     submission = q.scalar_one_or_none()
-
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -132,20 +148,17 @@ async def approve_submission(db: AsyncSession, submission_id: int):
         raise HTTPException(status_code=400, detail="Only submitted items can be approved")
 
     submission.status = "approved"
-    submission.approved_at = datetime.utcnow()
+    if hasattr(submission, "approved_at"):
+        submission.approved_at = datetime.utcnow()
 
     await db.commit()
     await db.refresh(submission)
-
     return submission
 
 
 async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
-    q = await db.execute(
-        select(EventSubmission).where(EventSubmission.id == submission_id)
-    )
+    q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
     submission = q.scalar_one_or_none()
-
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
@@ -153,11 +166,11 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
         raise HTTPException(status_code=400, detail="Only submitted items can be rejected")
 
     submission.status = "rejected"
-    submission.rejection_reason = reason
+    if hasattr(submission, "rejection_reason"):
+        submission.rejection_reason = reason
 
     await db.commit()
     await db.refresh(submission)
-
     return submission
 
 
@@ -168,7 +181,6 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 async def list_active_events(db: AsyncSession):
     """
     Returns active events from today onwards (upcoming + today).
-    UI can show Upcoming/Ongoing/Past by comparing dates.
     """
     today = date.today()
     q = await db.execute(
@@ -187,36 +199,31 @@ async def list_active_events(db: AsyncSession):
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     """
-    IMPORTANT CHANGE:
-    - Registration is allowed ONLY when the event is available today (and within start/end time if set).
-    This prevents tomorrow's event from being started today.
+    Registration allowed only on event day + within window + active.
     """
-    q = await db.execute(select(Event).where(Event.id == event_id, Event.is_active == True))
+    q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
 
-    if not event:
+    if not event or not event.is_active:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # ✅ BLOCK future events (tomorrow etc.)
     _ensure_event_window(event)
 
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event_id,
-            EventSubmission.student_id == student_id
+            EventSubmission.student_id == student_id,
         )
     )
     existing = q.scalar_one_or_none()
-
     if existing:
         return {"submission_id": existing.id, "status": existing.status}
 
     submission = EventSubmission(
         event_id=event_id,
         student_id=student_id,
-        status="in_progress"
+        status="in_progress",
     )
-
     db.add(submission)
     await db.commit()
     await db.refresh(submission)
@@ -236,8 +243,9 @@ async def add_photo(
     image_url: str,
 ):
     """
-    Adds/updates a photo for an EventSubmission.
-    ✅ Now enforces event window (prevents uploading before event day/time)
+    Adds/updates a photo for an EventSubmissionPhoto table.
+    NOTE: Your current routes upload into ActivityPhoto table.
+    Use this only if you want event_submission_photos storage.
     """
     q = await db.execute(
         select(EventSubmission).where(
@@ -246,28 +254,22 @@ async def add_photo(
         )
     )
     submission = q.scalar_one_or_none()
-
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
     if submission.status != "in_progress":
         raise HTTPException(status_code=400, detail="Submission already completed")
 
-    # ✅ fetch event and block if not within allowed window
     evq = await db.execute(select(Event).where(Event.id == submission.event_id))
     event = evq.scalar_one_or_none()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
     _ensure_event_window(event)
 
-    q = await db.execute(select(Event.required_photos).where(Event.id == submission.event_id))
-    required_photos = q.scalar_one()
-
+    required_photos = int(event.required_photos or 3)
     if seq_no < 1 or seq_no > required_photos:
-        raise HTTPException(
-            status_code=400,
-            detail=f"seq_no must be between 1 and {required_photos}"
-        )
+        raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {required_photos}")
 
     q = await db.execute(
         select(EventSubmissionPhoto).where(
@@ -288,11 +290,9 @@ async def add_photo(
         seq_no=seq_no,
         image_url=image_url,
     )
-
     db.add(photo)
     await db.commit()
     await db.refresh(photo)
-
     return photo
 
 
@@ -300,15 +300,7 @@ async def add_photo(
 # ---------------------- FINAL SUBMIT ----------------------
 # =========================================================
 
-async def final_submit(
-    db: AsyncSession,
-    submission_id: int,
-    student_id: int,
-    description: str
-):
-    """
-    ✅ Now enforces event window (prevents submitting before event day/time)
-    """
+async def final_submit(db: AsyncSession, submission_id: int, student_id: int, description: str):
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
@@ -316,29 +308,27 @@ async def final_submit(
         )
     )
     submission = q.scalar_one_or_none()
-
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
     if submission.status != "in_progress":
         raise HTTPException(status_code=400, detail="Already submitted")
 
-    # ✅ fetch event and block if not within allowed window
     evq = await db.execute(select(Event).where(Event.id == submission.event_id))
     event = evq.scalar_one_or_none()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
+
     _ensure_event_window(event)
 
-    q = await db.execute(select(Event.required_photos).where(Event.id == submission.event_id))
-    required_photos = q.scalar_one()
+    required_photos = int(event.required_photos or 3)
 
     q = await db.execute(
         select(func.count(EventSubmissionPhoto.id)).where(
             EventSubmissionPhoto.submission_id == submission_id
         )
     )
-    uploaded_photos = q.scalar() or 0
+    uploaded_photos = int(q.scalar() or 0)
 
     if uploaded_photos < required_photos:
         raise HTTPException(
@@ -355,5 +345,4 @@ async def final_submit(
 
     await db.commit()
     await db.refresh(submission)
-
     return submission

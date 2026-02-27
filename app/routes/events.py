@@ -1,4 +1,9 @@
-# app/routes/events.py  ✅ UPDATED — adds PUT /admin/events/{event_id}
+# app/routes/events.py  ✅ FULL UPDATED
+# - Adds: POST /admin/events/{event_id}/end
+# - Fixes: admin update uses correct fields (start_time/end_time, thumbnail_url)
+# - Keeps: your current flow where "submission_id" is actually ActivitySession.id
+#   (because your frontend + schemas PhotosUploadOut/PhotoOut are ActivityPhoto based)
+
 from typing import List
 from datetime import datetime
 
@@ -38,6 +43,7 @@ from app.controllers.events_controller import (
     approve_submission,
     reject_submission,
     get_event_thumbnail_upload_url,
+    end_event,  # ✅ add
 )
 
 router = APIRouter(tags=["Events"])
@@ -56,8 +62,7 @@ async def admin_create_event_api(
     return await create_event(db, payload)
 
 
-# ⚠️ Keep thumbnail-upload-url BEFORE /{event_id} so FastAPI doesn't
-# treat "thumbnail-upload-url" as an integer path param.
+# ⚠️ Keep thumbnail-upload-url BEFORE /{event_id}
 @router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
 async def admin_event_thumbnail_upload_url(
     payload: ThumbnailUploadUrlIn,
@@ -71,7 +76,7 @@ async def admin_event_thumbnail_upload_url(
     )
 
 
-# ✅ NEW: Full event edit
+# ✅ UPDATE Event (matches your DB columns: event_date, start_time, end_time, thumbnail_url)
 @router.put("/admin/events/{event_id}", response_model=EventOut)
 async def admin_update_event_api(
     event_id: int,
@@ -79,30 +84,23 @@ async def admin_update_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    """
-    Update any field of an existing event.
-    Uses the same EventCreateIn schema as creation so all fields are editable:
-    title, description, event_date, event_time, venue_name, venue_maps_url,
-    required_photos, activity_list, thumbnail_url.
-    """
     res = await db.execute(select(Event).where(Event.id == event_id))
     ev = res.scalar_one_or_none()
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # Apply all fields from payload
     ev.title = payload.title.strip()
     ev.description = (payload.description or "").strip() or None
 
-    # Support both field name variants the schema might use
-    ev.event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
-    ev.event_time = getattr(payload, "event_time", None) or getattr(payload, "time", None)
-
-    ev.venue_name = (payload.venue_name or "").strip() or None
-    ev.venue_maps_url = (payload.venue_maps_url or "").strip() or None
     ev.required_photos = int(payload.required_photos or 3)
-    ev.activity_list = payload.activity_list or []
-    ev.thumbnail_url = payload.thumbnail_url or None
+
+    # ✅ schedule columns (as per your table screenshot)
+    ev.event_date = payload.event_date
+    ev.start_time = payload.start_time
+    ev.end_time = payload.end_time
+
+    # ✅ thumbnail
+    ev.thumbnail_url = payload.thumbnail_url
 
     await db.commit()
     await db.refresh(ev)
@@ -116,6 +114,16 @@ async def admin_delete_event_api(
     admin=Depends(get_current_admin),
 ):
     await delete_event(db, event_id)
+
+
+# ✅ NEW: End Event (sets is_active=false, and window checks will block uploads/submits)
+@router.post("/admin/events/{event_id}/end", response_model=EventOut)
+async def admin_end_event_api(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    return await end_event(db, event_id)
 
 
 # ══════════════════════════════════════════════
@@ -153,6 +161,7 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    # NOTE: In your current design submission_id == ActivitySession.id
     session_res = await db.execute(
         select(ActivitySession).where(
             ActivitySession.id == submission_id,
