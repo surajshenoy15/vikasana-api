@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
@@ -8,6 +8,7 @@ from app.core.dependencies import get_current_faculty, get_current_admin, get_cu
 from app.models.faculty import Faculty
 from app.models.admin import Admin
 from app.models.student import Student
+from app.models.activity_session import ActivitySession  # ✅ NEW (for activities count)
 
 from app.schemas.student import StudentCreate, StudentOut, BulkUploadResult
 from app.controllers.student_controller import create_student, create_students_from_csv
@@ -31,9 +32,23 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
+    # ✅ Activities count subquery
+    activities_sq = (
+        select(
+            ActivitySession.student_id.label("student_id"),
+            func.count(ActivitySession.id).label("activities_count"),
+        )
+        .group_by(ActivitySession.student_id)
+        .subquery()
+    )
+
     stmt = (
-        select(Student)
+        select(
+            Student,
+            func.coalesce(activities_sq.c.activities_count, 0).label("activities_count"),
+        )
         .options(selectinload(Student.created_by_faculty))  # ✅ load mentor
+        .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)  # ✅ join counts
         .where(Student.college == current_faculty.college)  # ✅ scope to faculty college
     )
 
@@ -63,9 +78,8 @@ async def list_students(
     stmt = stmt.order_by(Student.id.desc()).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
-    students = result.scalars().all()
+    rows = result.all()  # ✅ (Student, activities_count)
 
-    # ✅ Build response with mentor name
     return [
         StudentOut(
             id=s.id,
@@ -78,8 +92,9 @@ async def list_students(
             admitted_year=s.admitted_year,
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+            activities_count=int(activities_count or 0),  # ✅ NEW
         )
-        for s in students
+        for (s, activities_count) in rows
     ]
 
 
@@ -103,6 +118,7 @@ async def add_student_manual(
             admitted_year=s.admitted_year,
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+            activities_count=0,  # ✅ safe default
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -157,7 +173,24 @@ async def list_students_admin(
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
-    stmt = select(Student).options(selectinload(Student.created_by_faculty))
+    # ✅ Activities count subquery
+    activities_sq = (
+        select(
+            ActivitySession.student_id.label("student_id"),
+            func.count(ActivitySession.id).label("activities_count"),
+        )
+        .group_by(ActivitySession.student_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(
+            Student,
+            func.coalesce(activities_sq.c.activities_count, 0).label("activities_count"),
+        )
+        .options(selectinload(Student.created_by_faculty))
+        .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
+    )
 
     if college and college.strip():
         stmt = stmt.where(Student.college == college.strip())
@@ -188,7 +221,7 @@ async def list_students_admin(
     stmt = stmt.order_by(Student.id.desc()).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
-    students = result.scalars().all()
+    rows = result.all()  # ✅ (Student, activities_count)
 
     return [
         StudentOut(
@@ -202,10 +235,15 @@ async def list_students_admin(
             admitted_year=s.admitted_year,
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+            activities_count=int(activities_count or 0),  # ✅ NEW
         )
-        for s in students
+        for (s, activities_count) in rows
     ]
 
+
+# ─────────────────────────────────────────────────────────────
+# STUDENT ROUTES (PROFILE)
+# ─────────────────────────────────────────────────────────────
 
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
 
