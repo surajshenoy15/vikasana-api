@@ -13,7 +13,7 @@ from app.schemas.activity_type import (
     ActivityTypeOut,
 )
 
-router = APIRouter(prefix="/api/activity-types", tags=["Activity Types"])
+router = APIRouter(prefix="/api/activity-types")
 
 
 # ─────────────────────────────────────────────────────────────
