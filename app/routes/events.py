@@ -73,7 +73,6 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
             raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
         return _combine_event_datetime_ist_naive(event_date, end_val)
 
-    # unknown type
     raise HTTPException(status_code=422, detail="Invalid end_time type")
 
 
@@ -87,6 +86,7 @@ async def admin_create_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    # ✅ create_event controller now stores venue_name + maps_url too
     return await create_event(db, payload)
 
 
@@ -119,15 +119,17 @@ async def admin_update_event_api(
     ev.description = (payload.description or "").strip() or None
     ev.required_photos = int(payload.required_photos or 3)
 
-    # ✅ schedule columns (event_date, start_time, end_time)
+    # ✅ schedule columns
     ev.event_date = payload.event_date
     ev.start_time = payload.start_time
-
-    # ✅ FIX: end_time is DateTime in DB, payload might be time
     ev.end_time = _as_naive_datetime_for_end_time(payload.event_date, payload.end_time)
 
     # ✅ thumbnail
     ev.thumbnail_url = payload.thumbnail_url
+
+    # ✅ NEW: location fields (save to DB)
+    ev.venue_name = (payload.venue_name or "").strip() or None
+    ev.maps_url = (payload.maps_url or "").strip() or None
 
     await db.commit()
     await db.refresh(ev)
@@ -161,8 +163,21 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ list_active_events must include ended events so Past tab can show them
     return await list_active_events(db)
+
+
+# ✅ NEW: fetch single event (for History -> View details screen)
+@router.get("/student/events/{event_id}", response_model=EventOut)
+async def student_event_detail(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    res = await db.execute(select(Event).where(Event.id == event_id))
+    ev = res.scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return ev
 
 
 @router.post("/student/events/{event_id}/register", response_model=RegisterOut)

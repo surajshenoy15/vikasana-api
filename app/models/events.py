@@ -1,10 +1,20 @@
 # app/models/events.py
 from datetime import datetime, timezone
+
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean,
-    DateTime, ForeignKey, UniqueConstraint, Date, Time
+    Column,
+    Integer,
+    String,
+    Text,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    UniqueConstraint,
+    Date,
+    Time,
 )
 from sqlalchemy.orm import relationship
+
 from app.core.database import Base
 
 
@@ -25,6 +35,10 @@ class Event(Base):
     # This is TIMESTAMP WITHOUT TIME ZONE in Postgres by default.
     # So we store NAIVE datetime in controllers.
     end_time = Column(DateTime, nullable=True)
+
+    # ✅ NEW: Location fields (Admin "Location" section)
+    venue_name = Column(String(255), nullable=True)
+    maps_url = Column(Text, nullable=True)
 
     # timezone aware UTC
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -50,9 +64,7 @@ class EventSubmission(Base):
     event = relationship("Event", back_populates="submissions")
     photos = relationship("EventSubmissionPhoto", back_populates="submission")
 
-    __table_args__ = (
-        UniqueConstraint("event_id", "student_id", name="uq_event_student"),
-    )
+    __table_args__ = (UniqueConstraint("event_id", "student_id", name="uq_event_student"),)
 
 
 class EventSubmissionPhoto(Base):
@@ -68,6 +80,4 @@ class EventSubmissionPhoto(Base):
 
     submission = relationship("EventSubmission", back_populates="photos")
 
-    __table_args__ = (
-        UniqueConstraint("submission_id", "seq_no", name="uq_submission_seq"),
-    )
+    __table_args__ = (UniqueConstraint("submission_id", "seq_no", name="uq_submission_seq"),)

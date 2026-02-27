@@ -13,59 +13,34 @@ from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
-# =========================================================
-# Time helpers (IST) - IMPORTANT:
-# Your DB column events.end_time is TIMESTAMP WITHOUT TIME ZONE,
-# so we ALWAYS store NAIVE datetime (tzinfo=None).
-# =========================================================
-
 IST = ZoneInfo("Asia/Kolkata")
 
 
 def _now_ist_naive() -> datetime:
-    """IST time but tz stripped → safe for TIMESTAMP WITHOUT TIME ZONE"""
     return datetime.now(IST).replace(tzinfo=None)
 
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
-    """
-    Combine event_date + time into a NAIVE datetime that represents IST clock time.
-    Stored as naive in DB, and compared with _now_ist_naive().
-    """
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
 def _ensure_event_window(event: Event) -> None:
-    """
-    Enforces:
-      - event must be active (is_active = True)
-      - accessible ONLY on event_date (IST date)
-      - must be within start_time/end_time if configured
-
-    Notes:
-      - start_time is TIME (safe compare with now.time()).
-      - end_time is DateTime (timestamp without tz) so compare with _now_ist_naive().
-    """
-    now_dt = _now_ist_naive()  # naive datetime (IST clock)
+    now_dt = _now_ist_naive()
     now_date = now_dt.date()
     now_time = now_dt.time()
 
-    # block ended/inactive events
     if not getattr(event, "is_active", True):
         raise HTTPException(status_code=403, detail="Event has ended.")
 
     if not getattr(event, "event_date", None):
         raise HTTPException(status_code=400, detail="Event date not configured.")
 
-    # must be same day (IST)
     if event.event_date != now_date:
         raise HTTPException(status_code=403, detail="Event is not available today.")
 
-    # start window (TIME)
     if getattr(event, "start_time", None) and now_time < event.start_time:
         raise HTTPException(status_code=403, detail="Event has not started yet.")
 
-    # end window:
     end_val = getattr(event, "end_time", None)
     if end_val:
         if isinstance(end_val, datetime):
@@ -109,6 +84,10 @@ async def create_event(db: AsyncSession, payload):
                 raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
             end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
 
+    # ✅ NEW: read venue_name/maps_url
+    venue_name = getattr(payload, "venue_name", None)
+    maps_url = getattr(payload, "maps_url", None)
+
     event = Event(
         title=payload.title,
         description=payload.description,
@@ -118,6 +97,10 @@ async def create_event(db: AsyncSession, payload):
         start_time=start_time,
         end_time=end_time_dt,
         thumbnail_url=getattr(payload, "thumbnail_url", None),
+
+        # ✅ NEW: save to DB
+        venue_name=venue_name,
+        maps_url=maps_url,
     )
     db.add(event)
     await db.commit()
@@ -126,11 +109,6 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int) -> Event:
-    """
-    Admin ends event now:
-      - is_active = False
-      - end_time = current IST datetime (NAIVE) to match DB TIMESTAMP WITHOUT TZ
-    """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
 
@@ -138,7 +116,7 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
         raise HTTPException(status_code=404, detail="Event not found")
 
     if getattr(event, "is_active", True) is False:
-        return event  # already ended
+        return event
 
     event.is_active = False
     if hasattr(event, "end_time"):
@@ -220,16 +198,6 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
-    """
-    ✅ IMPORTANT FIX:
-    Return events from today onwards INCLUDING ended ones,
-    so frontend can show them under Past tab.
-
-    Frontend will classify:
-      - Upcoming (date in future OR not started yet)
-      - Ongoing (today + within window + is_active True)
-      - Past (is_active False OR end_time passed)
-    """
     today_ist = _now_ist_naive().date()
 
     q = await db.execute(

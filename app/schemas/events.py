@@ -1,5 +1,5 @@
 # =========================================================
-# app/schemas/events.py  ✅ FULL UPDATED
+# app/schemas/events.py  ✅ FULL UPDATED (WITH LOCATION)
 # =========================================================
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -17,6 +17,10 @@ class EventCreateIn(BaseModel):
     end_time: Optional[time] = None
     thumbnail_url: Optional[str] = None
 
+    # ✅ NEW (Location)
+    venue_name: Optional[str] = None
+    maps_url: Optional[str] = None
+
 
 class EventOut(BaseModel):
     id: int
@@ -28,6 +32,10 @@ class EventOut(BaseModel):
     start_time: Optional[time] = None
     end_time: Optional[time] = None
     thumbnail_url: Optional[str] = None
+
+    # ✅ NEW (Location)
+    venue_name: Optional[str] = None
+    maps_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -50,10 +58,7 @@ class RegisterOut(BaseModel):
     status: str
 
 
-# ------------------ PHOTOS (ActivityPhoto based) ------------------
-# NOTE:
-# Your DB table is activity_photos (needs: student_id, lat, lng, captured_at, seq_no, image_url).
-# So PhotoOut must match ActivityPhoto, not old EventSubmissionPhoto.
+# ------------------ PHOTOS ------------------
 
 class PhotoOut(BaseModel):
     id: int
