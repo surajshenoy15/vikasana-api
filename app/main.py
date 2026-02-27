@@ -1,4 +1,3 @@
-# app/main.py
 from dotenv import load_dotenv
 import os
 
@@ -18,9 +17,9 @@ from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_main_router
 from app.routes.student_auth import router as student_auth_router
 from app.routes.activity_summary import router as activity_summary_router
-from app.routes.events import router as events_router
+from app.routes.events import router as events_router  # student events (if you have it)
 
-# activity routers (student + admin + legacy)
+# activity routers (student + admin)
 from app.routes.activity import router as student_activity_router
 from app.routes.activity import admin_router as admin_activity_router
 from app.routes.activity import legacy_router as student_legacy_router
@@ -38,11 +37,7 @@ from app.routes.face_routes import router as face_router
 # ✅ admin sessions router
 from app.routes.admin_sessions import router as admin_sessions_router
 
-# ✅ NEW: admin events router (your separate admin routes/controller)
-# IMPORTANT: change this import path to your actual file name if different.
-# Example alternatives:
-# - from app.routes.admin_events import router as admin_events_router
-# - from app.routes.events_admin import router as admin_events_router
+# ✅ NEW: admin events router (end event)
 from app.routes.admin_events import router as admin_events_router
 
 
@@ -102,21 +97,14 @@ app.include_router(student_activity_router, prefix="/api")
 app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
-# ✅ Admin Sessions: /api/admin/sessions/...
-app.include_router(admin_sessions_router, prefix="/api")
+# ✅ Admin APIs
+app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
+app.include_router(admin_events_router, prefix="/api")    # -> /api/admin/events/{id}/end
 
-# ✅ Admin Events: /api/admin/events/...
-# (this is the one that should contain POST /admin/events/{id}/end)
-app.include_router(admin_events_router, prefix="/api")
-
-# existing routers
+# Other
 app.include_router(activity_summary_router, prefix="/api")
-
-# If events_router contains student/public endpoints keep it;
-# if it also contains admin endpoints and conflicts, remove it OR ensure prefixes differ.
-app.include_router(events_router, prefix="/api")
-
-app.include_router(face_router, prefix="/api")  # -> /api/face/...
+app.include_router(events_router, prefix="/api")          # if this exists (student events list)
+app.include_router(face_router, prefix="/api")            # -> /api/face/...
 
 @app.get("/", tags=["Health"])
 async def root():
