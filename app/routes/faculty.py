@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, desc
+from sqlalchemy.orm import selectinload
 import csv
 import io
 
@@ -11,14 +12,7 @@ from app.models.admin import Admin
 from app.models.faculty import Faculty
 from app.models.student import Student
 
-# ✅ activity session models
-from app.models.activity_session import ActivitySession
-
-# If you have an enum for status, import it safely
-try:
-    from app.models.activity_session import ActivitySessionStatus  # type: ignore
-except Exception:
-    ActivitySessionStatus = None  # fallback
+from app.models.activity_session import ActivitySession, ActivitySessionStatus
 
 from app.schemas.faculty import (
     FacultyCreateResponse,
@@ -54,11 +48,7 @@ router = APIRouter(prefix="/faculty", tags=["Faculty"])
 # ADMIN ONLY: CREATE / LIST / DELETE FACULTY
 # =========================================================
 
-@router.post(
-    "",
-    response_model=FacultyCreateResponse,
-    summary="Create Faculty (Admin only)",
-)
+@router.post("", response_model=FacultyCreateResponse, summary="Create Faculty (Admin only)")
 async def add_faculty(
     full_name: str = Form(...),
     college: str = Form(...),
@@ -95,11 +85,7 @@ async def add_faculty(
     }
 
 
-@router.post(
-    "/import-csv",
-    response_model=FacultyImportResponse,
-    summary="Import Faculty via CSV (Admin only)",
-)
+@router.post("/import-csv", response_model=FacultyImportResponse, summary="Import Faculty via CSV (Admin only)")
 async def import_faculty_csv(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
@@ -129,8 +115,6 @@ async def import_faculty_csv(
     failed_rows: list[FailedRow] = []
     created_count = 0
     email_sent_count = 0
-
-    # CSV header is row 1
     row_number = 1
 
     for row in reader:
@@ -148,17 +132,11 @@ async def import_faculty_csv(
             if not college:
                 raise ValueError("college is required")
 
-            # prevent duplicates
             existing = await db.execute(select(Faculty).where(Faculty.email == email))
             if existing.scalar_one_or_none():
                 raise ValueError("email already exists")
 
-            payload = FacultyCreateRequest(
-                full_name=full_name,
-                college=college,
-                email=email,
-                role=role,
-            )
+            payload = FacultyCreateRequest(full_name=full_name, college=college, email=email, role=role)
 
             faculty, email_sent = await create_faculty(
                 payload=payload,
@@ -185,11 +163,7 @@ async def import_faculty_csv(
     )
 
 
-@router.get(
-    "",
-    response_model=list[FacultyResponse],
-    summary="List faculty (Admin only)",
-)
+@router.get("", response_model=list[FacultyResponse], summary="List faculty (Admin only)")
 async def list_faculty(
     db: AsyncSession = Depends(get_db),
     admin: Admin = Depends(get_current_admin),
@@ -215,7 +189,7 @@ async def delete_faculty(
 
 
 # =========================================================
-# FACULTY APP: DASHBOARD STATS (keys match frontend)
+# FACULTY APP: DASHBOARD STATS
 # GET /api/faculty/dashboard/stats
 # =========================================================
 
@@ -245,17 +219,17 @@ async def dashboard_stats(
 
 @router.get("/activity-sessions", summary="List activity sessions (Faculty auth)")
 async def list_activity_sessions(
-    q: str | None = Query(None, description="Search by student name/usn/activity name"),
-    status: str | None = Query(None, description="pending/approved/rejected"),
+    q: str | None = Query(None, description="Search by student name/usn/activity"),
+    status: str | None = Query(None, description="DRAFT/SUBMITTED/APPROVED/REJECTED/FLAGGED/EXPIRED"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
     stmt = (
-        select(ActivitySession, Student)
-        .join(Student, Student.id == ActivitySession.student_id)
-        .where(Student.college == current_faculty.college)
+        select(ActivitySession)
+        .options(selectinload(ActivitySession.student))  # ✅ prevents MissingGreenlet
+        .where(ActivitySession.student.has(Student.college == current_faculty.college))
         .order_by(desc(ActivitySession.created_at))
         .limit(limit)
         .offset(offset)
@@ -267,35 +241,32 @@ async def list_activity_sessions(
             or_(
                 func.lower(Student.name).like(qq),
                 func.lower(Student.usn).like(qq),
-                func.lower(func.coalesce(getattr(ActivitySession, "activity_name", None), "")).like(qq),
-                func.lower(func.coalesce(getattr(ActivitySession, "title", None), "")).like(qq),
+                func.lower(ActivitySession.activity_name).like(qq),
             )
         )
 
     if status:
-        s = status.strip().lower()
-        if s in ("pending", "approved", "rejected"):
-            if ActivitySessionStatus:
-                stmt = stmt.where(ActivitySession.status == ActivitySessionStatus[s.upper()])
-            else:
-                stmt = stmt.where(func.lower(ActivitySession.status) == s)
+        s = status.strip().upper()
+        # only filter if matches enum
+        if s in ActivitySessionStatus.__members__:
+            stmt = stmt.where(ActivitySession.status == ActivitySessionStatus[s])
 
-    rows = (await db.execute(stmt)).all()
+    sessions = (await db.execute(stmt)).scalars().all()
 
+    # ✅ Map to frontend shape
     activities = []
-    for sess, stu in rows:
+    for sess in sessions:
+        stu = sess.student  # already loaded via selectinload
         activities.append(
             {
                 "id": sess.id,
-                "title": getattr(sess, "activity_name", None)
-                        or getattr(sess, "title", None)
-                        or "Activity",
-                "student_name": stu.name,
-                "usn": stu.usn,
-                "category": getattr(sess, "category", None) or getattr(sess, "activity_type", None),
-                "description": getattr(sess, "description", None),
-                "status": str(getattr(sess, "status", "pending")).lower(),
-                "submitted_at": getattr(sess, "submitted_at", None) or getattr(sess, "created_at", None),
+                "title": sess.activity_name,
+                "student_name": stu.name if stu else "—",
+                "usn": stu.usn if stu else "—",
+                "category": None,  # you can fill from activity_type if you want (add selectinload)
+                "description": sess.description,
+                "status": (sess.status.value if hasattr(sess.status, "value") else str(sess.status)).lower(),
+                "submitted_at": sess.submitted_at or sess.created_at,
             }
         )
 
@@ -305,7 +276,7 @@ async def list_activity_sessions(
 # =========================================================
 # ✅ FACULTY APP: UPDATE STATUS (Approve/Reject)
 # PATCH /api/faculty/activity-sessions/{session_id}/status
-# Body: {"status":"approved"} / {"status":"rejected"}
+# Body: {"status":"APPROVED"} or {"status":"REJECTED"}
 # =========================================================
 
 @router.patch("/activity-sessions/{session_id}/status", summary="Update activity session status (Faculty auth)")
@@ -315,62 +286,50 @@ async def update_activity_session_status(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
-    new_status = (body.get("status") or "").strip().lower()
-    if new_status not in ("pending", "approved", "rejected"):
-        raise HTTPException(status_code=400, detail="status must be one of: pending, approved, rejected")
+    raw = (body.get("status") or "").strip().upper()
+
+    # UI uses approved/rejected, map to enum values
+    if raw in ("APPROVED", "REJECTED", "SUBMITTED", "FLAGGED", "DRAFT", "EXPIRED"):
+        new_status = ActivitySessionStatus[raw]
+    elif raw.lower() in ("approved", "rejected"):
+        new_status = ActivitySessionStatus.APPROVED if raw.lower() == "approved" else ActivitySessionStatus.REJECTED
+    else:
+        raise HTTPException(status_code=400, detail="status must be approved or rejected")
 
     q = await db.execute(
-        select(ActivitySession, Student)
-        .join(Student, Student.id == ActivitySession.student_id)
+        select(ActivitySession)
+        .options(selectinload(ActivitySession.student))
         .where(ActivitySession.id == session_id)
     )
-    row = q.first()
-    if not row:
+    sess = q.scalar_one_or_none()
+    if not sess:
         raise HTTPException(status_code=404, detail="Activity session not found")
 
-    sess, stu = row
-
     # Ensure faculty can update only their college students
-    if (stu.college or "") != (current_faculty.college or ""):
+    if not sess.student or (sess.student.college or "") != (current_faculty.college or ""):
         raise HTTPException(status_code=403, detail="Not allowed")
 
-    # set status (enum or string)
-    if ActivitySessionStatus:
-        sess.status = ActivitySessionStatus[new_status.upper()]
-    else:
-        sess.status = new_status
-
+    sess.status = new_status
     await db.commit()
     await db.refresh(sess)
 
-    return {"detail": "Status updated", "id": sess.id, "status": str(sess.status).lower()}
+    return {"detail": "Status updated", "id": sess.id, "status": sess.status.value.lower()}
 
 
 # =========================================================
-# ✅ NEW ACTIVATION FLOW (OTP + Set Password)
+# ✅ ACTIVATION FLOW (unchanged)
 # =========================================================
 
-@router.get(
-    "/activation/validate",
-    response_model=ActivationValidateResponse,
-    summary="Validate activation token and create activation session",
-)
+@router.get("/activation/validate", response_model=ActivationValidateResponse, summary="Validate activation token and create activation session")
 async def activation_validate(
     token: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     session_id, email_masked, expires_at = await validate_activation_token_and_create_session(token, db)
-    return {
-        "activation_session_id": session_id,
-        "email_masked": email_masked,
-        "expires_at": expires_at,
-    }
+    return {"activation_session_id": session_id, "email_masked": email_masked, "expires_at": expires_at}
 
 
-@router.post(
-    "/activation/send-otp",
-    summary="Send OTP to faculty email",
-)
+@router.post("/activation/send-otp", summary="Send OTP to faculty email")
 async def activation_send_otp(
     body: SendOtpRequest,
     db: AsyncSession = Depends(get_db),
@@ -379,11 +338,7 @@ async def activation_send_otp(
     return {"detail": "OTP sent successfully"}
 
 
-@router.post(
-    "/activation/verify-otp",
-    response_model=VerifyOtpResponse,
-    summary="Verify OTP and return set password token",
-)
+@router.post("/activation/verify-otp", response_model=VerifyOtpResponse, summary="Verify OTP and return set password token")
 async def activation_verify_otp(
     body: VerifyOtpRequest,
     db: AsyncSession = Depends(get_db),
@@ -392,11 +347,7 @@ async def activation_verify_otp(
     return {"set_password_token": set_password_token}
 
 
-@router.post(
-    "/activation/set-password",
-    response_model=SetPasswordResponse,
-    summary="Set password after OTP verification",
-)
+@router.post("/activation/set-password", response_model=SetPasswordResponse, summary="Set password after OTP verification")
 async def activation_set_password(
     body: SetPasswordRequest,
     db: AsyncSession = Depends(get_db),
@@ -405,15 +356,7 @@ async def activation_set_password(
     return {"detail": "Password set successfully. Account activated."}
 
 
-# =========================================================
-# OPTIONAL: OLD ACTIVATE ENDPOINT (not recommended)
-# =========================================================
-
-@router.get(
-    "/activate",
-    response_model=ActivateFacultyResponse,
-    summary="(OLD) Activate faculty account via email token (no OTP)",
-)
+@router.get("/activate", response_model=ActivateFacultyResponse, summary="(OLD) Activate faculty account via email token (no OTP)")
 async def activate(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     await activate_faculty(token, db)
     return {"detail": "Account activated successfully."}
