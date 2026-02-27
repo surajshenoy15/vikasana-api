@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
+from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_faculty, get_current_admin
-from app.core.dependencies import get_current_student
+from app.core.dependencies import get_current_faculty, get_current_admin, get_current_student
 from app.models.faculty import Faculty
 from app.models.admin import Admin
 from app.models.student import Student
@@ -31,10 +31,12 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
 ):
-    # ✅ IMPORTANT: scope students to this faculty's college
-    stmt = select(Student).where(Student.college == current_faculty.college)
+    stmt = (
+        select(Student)
+        .options(selectinload(Student.created_by_faculty))  # ✅ load mentor
+        .where(Student.college == current_faculty.college)  # ✅ scope to faculty college
+    )
 
-    # Search (within same college)
     if q and q.strip():
         like = f"%{q.strip()}%"
         stmt = stmt.where(
@@ -46,7 +48,6 @@ async def list_students(
             )
         )
 
-    # Filters
     if student_type and student_type.strip():
         stmt = stmt.where(Student.student_type == student_type.strip().upper())
 
@@ -62,18 +63,47 @@ async def list_students(
     stmt = stmt.order_by(Student.id.desc()).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
-    return result.scalars().all()
+    students = result.scalars().all()
+
+    # ✅ Build response with mentor name
+    return [
+        StudentOut(
+            id=s.id,
+            name=s.name,
+            usn=s.usn,
+            branch=s.branch,
+            email=s.email,
+            student_type=str(s.student_type),
+            passout_year=s.passout_year,
+            admitted_year=s.admitted_year,
+            college=s.college,
+            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        )
+        for s in students
+    ]
 
 
 @faculty_router.post("", response_model=StudentOut)
 async def add_student_manual(
     payload: StudentCreate,
     db: AsyncSession = Depends(get_db),
-    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
+    current_faculty: Faculty = Depends(get_current_faculty),
 ):
     try:
-        # ✅ enforce college from logged-in faculty
-        return await create_student(db, payload, current_faculty.college)
+        # ✅ pass full faculty, not only college
+        s = await create_student(db, payload, current_faculty=current_faculty)
+        return StudentOut(
+            id=s.id,
+            name=s.name,
+            usn=s.usn,
+            branch=s.branch,
+            email=s.email,
+            student_type=str(s.student_type),
+            passout_year=s.passout_year,
+            admitted_year=s.admitted_year,
+            college=s.college,
+            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -83,19 +113,19 @@ async def add_students_bulk(
     file: UploadFile = File(...),
     skip_duplicates: bool = Query(True, description="If true, existing USNs/emails (in same college) will be skipped"),
     db: AsyncSession = Depends(get_db),
-    current_faculty: Faculty = Depends(get_current_faculty),  # ✅ AUTH ENFORCED
+    current_faculty: Faculty = Depends(get_current_faculty),
 ):
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv file is allowed")
 
     data = await file.read()
 
-    # ✅ enforce college from logged-in faculty
     total, inserted, skipped, invalid, errors = await create_students_from_csv(
         db=db,
         csv_bytes=data,
         skip_duplicates=skip_duplicates,
         faculty_college=current_faculty.college,
+        faculty_id=current_faculty.id,  # ✅ NEW
     )
 
     return BulkUploadResult(
@@ -125,9 +155,9 @@ async def list_students_admin(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    current_admin: Admin = Depends(get_current_admin),  # ✅ AUTH ENFORCED (ADMIN)
+    current_admin: Admin = Depends(get_current_admin),
 ):
-    stmt = select(Student)
+    stmt = select(Student).options(selectinload(Student.created_by_faculty))
 
     if college and college.strip():
         stmt = stmt.where(Student.college == college.strip())
@@ -158,7 +188,23 @@ async def list_students_admin(
     stmt = stmt.order_by(Student.id.desc()).limit(limit).offset(offset)
 
     result = await db.execute(stmt)
-    return result.scalars().all()
+    students = result.scalars().all()
+
+    return [
+        StudentOut(
+            id=s.id,
+            name=s.name,
+            usn=s.usn,
+            branch=s.branch,
+            email=s.email,
+            student_type=str(s.student_type),
+            passout_year=s.passout_year,
+            admitted_year=s.admitted_year,
+            college=s.college,
+            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        )
+        for s in students
+    ]
 
 
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
