@@ -1,7 +1,8 @@
-# app/controllers/events_controller.py  ✅ FULL UPDATED (FINAL)
+# app/controllers/events_controller.py
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime
+from datetime import date as date_type
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, func, delete as sql_delete
@@ -37,22 +38,23 @@ def _ensure_event_window(event: Event) -> None:
     if not getattr(event, "is_active", True):
         raise HTTPException(status_code=403, detail="Event has ended.")
 
-    if not event.event_date:
+    if not getattr(event, "event_date", None):
         raise HTTPException(status_code=400, detail="Event date not configured.")
 
-    # must be the same day
+    # must be the same day (IST date)
     if event.event_date != now.date():
         raise HTTPException(status_code=403, detail="Event is not available today.")
 
     # must be within time window if provided
-    if event.start_time and now.time() < event.start_time:
+    if getattr(event, "start_time", None) and now.time() < event.start_time:
         raise HTTPException(status_code=403, detail="Event has not started yet.")
 
-    if event.end_time and now.time() > event.end_time:
+    if getattr(event, "end_time", None) and now.time() > event.end_time:
         raise HTTPException(status_code=403, detail="Event has ended.")
 
 
 async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
+    # (You may optionally validate content_type here using ALLOWED_IMAGE_TYPES)
     return await generate_event_thumbnail_presigned_put(
         filename=filename,
         content_type=content_type,
@@ -94,11 +96,14 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if event.is_active is False:
+    if getattr(event, "is_active", True) is False:
         return event  # already ended
 
     event.is_active = False
-    event.end_time = _now_ist().time()
+
+    # If your DB end_time is TIME, assign time() not datetime
+    if hasattr(event, "end_time"):
+        event.end_time = _now_ist().time()
 
     await db.commit()
     await db.refresh(event)
@@ -180,14 +185,15 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 
 async def list_active_events(db: AsyncSession):
     """
-    Returns active events from today onwards (upcoming + today).
+    Returns active events from today onwards (upcoming + today), using IST date.
     """
-    today = date.today()
+    today_ist = _now_ist().date()
+
     q = await db.execute(
         select(Event).where(
             Event.is_active == True,
             Event.event_date != None,
-            Event.event_date >= today
+            Event.event_date >= today_ist
         ).order_by(
             Event.event_date.asc(),
             Event.start_time.asc().nulls_last(),
@@ -204,7 +210,7 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
 
-    if not event or not event.is_active:
+    if not event or not getattr(event, "is_active", True):
         raise HTTPException(status_code=404, detail="Event not found")
 
     _ensure_event_window(event)
@@ -244,7 +250,6 @@ async def add_photo(
 ):
     """
     Adds/updates a photo for an EventSubmissionPhoto table.
-    NOTE: Your current routes upload into ActivityPhoto table.
     Use this only if you want event_submission_photos storage.
     """
     q = await db.execute(
@@ -267,7 +272,7 @@ async def add_photo(
 
     _ensure_event_window(event)
 
-    required_photos = int(event.required_photos or 3)
+    required_photos = int(getattr(event, "required_photos", 3) or 3)
     if seq_no < 1 or seq_no > required_photos:
         raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {required_photos}")
 
@@ -321,7 +326,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     _ensure_event_window(event)
 
-    required_photos = int(event.required_photos or 3)
+    required_photos = int(getattr(event, "required_photos", 3) or 3)
 
     q = await db.execute(
         select(func.count(EventSubmissionPhoto.id)).where(
@@ -341,7 +346,8 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     submission.status = "submitted"
     submission.description = description
-    submission.submitted_at = datetime.utcnow()
+    if hasattr(submission, "submitted_at"):
+        submission.submitted_at = datetime.utcnow()
 
     await db.commit()
     await db.refresh(submission)

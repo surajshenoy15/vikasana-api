@@ -17,7 +17,9 @@ from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_main_router
 from app.routes.student_auth import router as student_auth_router
 from app.routes.activity_summary import router as activity_summary_router
-from app.routes.events import router as events_router  # student events (if you have it)
+
+# ✅ EVENTS router (admin + student events)
+from app.routes.events import router as events_router
 
 # activity routers (student + admin)
 from app.routes.activity import router as student_activity_router
@@ -36,9 +38,6 @@ from app.routes.face_routes import router as face_router
 
 # ✅ admin sessions router
 from app.routes.admin_sessions import router as admin_sessions_router
-
-# ✅ NEW: admin events router (end event)
-from app.routes.admin_events import router as admin_events_router
 
 
 app = FastAPI(
@@ -99,12 +98,14 @@ app.include_router(admin_activity_router, prefix="/api")
 
 # ✅ Admin APIs
 app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
-app.include_router(admin_events_router, prefix="/api")    # -> /api/admin/events/{id}/end
+
+# ✅ Events (admin + student)
+# includes: /api/admin/events/{id}/end  and /api/student/events etc
+app.include_router(events_router, prefix="/api")
 
 # Other
 app.include_router(activity_summary_router, prefix="/api")
-app.include_router(events_router, prefix="/api")          # if this exists (student events list)
-app.include_router(face_router, prefix="/api")            # -> /api/face/...
+app.include_router(face_router, prefix="/api")  # -> /api/face/...
 
 @app.get("/", tags=["Health"])
 async def root():

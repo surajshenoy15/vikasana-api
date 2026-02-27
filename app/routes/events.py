@@ -1,8 +1,4 @@
-# app/routes/events.py  ✅ FULL UPDATED
-# - Adds: POST /admin/events/{event_id}/end
-# - Fixes: admin update uses correct fields (start_time/end_time, thumbnail_url)
-# - Keeps: your current flow where "submission_id" is actually ActivitySession.id
-#   (because your frontend + schemas PhotosUploadOut/PhotoOut are ActivityPhoto based)
+# app/routes/events.py
 
 from typing import List
 from datetime import datetime
@@ -43,7 +39,7 @@ from app.controllers.events_controller import (
     approve_submission,
     reject_submission,
     get_event_thumbnail_upload_url,
-    end_event,  # ✅ add
+    end_event,  # ✅ single source of truth
 )
 
 router = APIRouter(tags=["Events"])
@@ -76,7 +72,6 @@ async def admin_event_thumbnail_upload_url(
     )
 
 
-# ✅ UPDATE Event (matches your DB columns: event_date, start_time, end_time, thumbnail_url)
 @router.put("/admin/events/{event_id}", response_model=EventOut)
 async def admin_update_event_api(
     event_id: int,
@@ -94,7 +89,7 @@ async def admin_update_event_api(
 
     ev.required_photos = int(payload.required_photos or 3)
 
-    # ✅ schedule columns (as per your table screenshot)
+    # ✅ schedule columns (event_date, start_time, end_time)
     ev.event_date = payload.event_date
     ev.start_time = payload.start_time
     ev.end_time = payload.end_time
@@ -116,7 +111,7 @@ async def admin_delete_event_api(
     await delete_event(db, event_id)
 
 
-# ✅ NEW: End Event (sets is_active=false, and window checks will block uploads/submits)
+# ✅ SINGLE end endpoint (NO duplicates anywhere else)
 @router.post("/admin/events/{event_id}/end", response_model=EventOut)
 async def admin_end_event_api(
     event_id: int,
