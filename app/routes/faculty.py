@@ -1,14 +1,24 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_, desc
 import csv
 import io
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin, get_current_faculty
+
 from app.models.admin import Admin
 from app.models.faculty import Faculty
 from app.models.student import Student
+
+# ✅ activity session models
+from app.models.activity_session import ActivitySession
+
+# If you have an enum for status, import it safely
+try:
+    from app.models.activity_session import ActivitySessionStatus  # type: ignore
+except Exception:
+    ActivitySessionStatus = None  # fallback
 
 from app.schemas.faculty import (
     FacultyCreateResponse,
@@ -17,7 +27,6 @@ from app.schemas.faculty import (
     FacultyCreateRequest,
 )
 
-# ✅ Option 1: separate schema file
 from app.schemas.faculty_import import FacultyImportResponse, FailedRow
 
 from app.schemas.faculty_activation import (
@@ -227,6 +236,114 @@ async def dashboard_stats(
         "pending": 0,
         "rejected": 0,
     }
+
+
+# =========================================================
+# ✅ FACULTY APP: LIST ACTIVITY SESSIONS (Activities Tab)
+# GET /api/faculty/activity-sessions
+# =========================================================
+
+@router.get("/activity-sessions", summary="List activity sessions (Faculty auth)")
+async def list_activity_sessions(
+    q: str | None = Query(None, description="Search by student name/usn/activity name"),
+    status: str | None = Query(None, description="pending/approved/rejected"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    current_faculty: Faculty = Depends(get_current_faculty),
+):
+    stmt = (
+        select(ActivitySession, Student)
+        .join(Student, Student.id == ActivitySession.student_id)
+        .where(Student.college == current_faculty.college)
+        .order_by(desc(ActivitySession.created_at))
+        .limit(limit)
+        .offset(offset)
+    )
+
+    if q:
+        qq = f"%{q.strip().lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(Student.name).like(qq),
+                func.lower(Student.usn).like(qq),
+                func.lower(func.coalesce(getattr(ActivitySession, "activity_name", None), "")).like(qq),
+                func.lower(func.coalesce(getattr(ActivitySession, "title", None), "")).like(qq),
+            )
+        )
+
+    if status:
+        s = status.strip().lower()
+        if s in ("pending", "approved", "rejected"):
+            if ActivitySessionStatus:
+                stmt = stmt.where(ActivitySession.status == ActivitySessionStatus[s.upper()])
+            else:
+                stmt = stmt.where(func.lower(ActivitySession.status) == s)
+
+    rows = (await db.execute(stmt)).all()
+
+    activities = []
+    for sess, stu in rows:
+        activities.append(
+            {
+                "id": sess.id,
+                "title": getattr(sess, "activity_name", None)
+                        or getattr(sess, "title", None)
+                        or "Activity",
+                "student_name": stu.name,
+                "usn": stu.usn,
+                "category": getattr(sess, "category", None) or getattr(sess, "activity_type", None),
+                "description": getattr(sess, "description", None),
+                "status": str(getattr(sess, "status", "pending")).lower(),
+                "submitted_at": getattr(sess, "submitted_at", None) or getattr(sess, "created_at", None),
+            }
+        )
+
+    return {"activities": activities, "count": len(activities)}
+
+
+# =========================================================
+# ✅ FACULTY APP: UPDATE STATUS (Approve/Reject)
+# PATCH /api/faculty/activity-sessions/{session_id}/status
+# Body: {"status":"approved"} / {"status":"rejected"}
+# =========================================================
+
+@router.patch("/activity-sessions/{session_id}/status", summary="Update activity session status (Faculty auth)")
+async def update_activity_session_status(
+    session_id: int,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_faculty: Faculty = Depends(get_current_faculty),
+):
+    new_status = (body.get("status") or "").strip().lower()
+    if new_status not in ("pending", "approved", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be one of: pending, approved, rejected")
+
+    q = await db.execute(
+        select(ActivitySession, Student)
+        .join(Student, Student.id == ActivitySession.student_id)
+        .where(ActivitySession.id == session_id)
+    )
+    row = q.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Activity session not found")
+
+    sess, stu = row
+
+    # Ensure faculty can update only their college students
+    if (stu.college or "") != (current_faculty.college or ""):
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    # set status (enum or string)
+    if ActivitySessionStatus:
+        sess.status = ActivitySessionStatus[new_status.upper()]
+    else:
+        sess.status = new_status
+
+    await db.commit()
+    await db.refresh(sess)
+
+    return {"detail": "Status updated", "id": sess.id, "status": str(sess.status).lower()}
 
 
 # =========================================================
