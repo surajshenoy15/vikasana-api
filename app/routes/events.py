@@ -1,7 +1,8 @@
 # app/routes/events.py
 
 from typing import List
-from datetime import datetime
+from datetime import datetime, date as date_type, time as time_type
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,7 +20,6 @@ from app.schemas.events import (
     EventCreateIn,
     EventOut,
     RegisterOut,
-    PhotoOut,
     PhotosUploadOut,
     FinalSubmitIn,
     SubmissionOut,
@@ -32,17 +32,49 @@ from app.schemas.events import (
 from app.controllers.events_controller import (
     create_event,
     delete_event,
-    list_active_events,
+    list_active_events,   # ✅ controller must return ended too
     register_for_event,
     final_submit,
     list_event_submissions,
     approve_submission,
     reject_submission,
     get_event_thumbnail_upload_url,
-    end_event,  # ✅ single source of truth
+    end_event,
 )
 
 router = APIRouter(tags=["Events"])
+
+# =========================================================
+# Helpers (match controller logic)
+# end_time in DB is TIMESTAMP WITHOUT TZ (naive datetime)
+# =========================================================
+
+IST = ZoneInfo("Asia/Kolkata")
+
+def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
+    # represents IST clock time but stored naive
+    return datetime.combine(event_date, t).replace(tzinfo=None)
+
+def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
+    """
+    Accepts end_val as:
+      - datetime -> strip tzinfo
+      - time     -> combine with event_date into datetime
+      - None     -> None
+    """
+    if end_val is None:
+        return None
+
+    if isinstance(end_val, datetime):
+        return end_val.replace(tzinfo=None)
+
+    if isinstance(end_val, time_type):
+        if not event_date:
+            raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+        return _combine_event_datetime_ist_naive(event_date, end_val)
+
+    # unknown type
+    raise HTTPException(status_code=422, detail="Invalid end_time type")
 
 
 # ══════════════════════════════════════════════
@@ -58,7 +90,6 @@ async def admin_create_event_api(
     return await create_event(db, payload)
 
 
-# ⚠️ Keep thumbnail-upload-url BEFORE /{event_id}
 @router.post("/admin/events/thumbnail-upload-url", response_model=ThumbnailUploadUrlOut)
 async def admin_event_thumbnail_upload_url(
     payload: ThumbnailUploadUrlIn,
@@ -86,13 +117,14 @@ async def admin_update_event_api(
 
     ev.title = payload.title.strip()
     ev.description = (payload.description or "").strip() or None
-
     ev.required_photos = int(payload.required_photos or 3)
 
     # ✅ schedule columns (event_date, start_time, end_time)
     ev.event_date = payload.event_date
     ev.start_time = payload.start_time
-    ev.end_time = payload.end_time
+
+    # ✅ FIX: end_time is DateTime in DB, payload might be time
+    ev.end_time = _as_naive_datetime_for_end_time(payload.event_date, payload.end_time)
 
     # ✅ thumbnail
     ev.thumbnail_url = payload.thumbnail_url
@@ -111,7 +143,6 @@ async def admin_delete_event_api(
     await delete_event(db, event_id)
 
 
-# ✅ SINGLE end endpoint (NO duplicates anywhere else)
 @router.post("/admin/events/{event_id}/end", response_model=EventOut)
 async def admin_end_event_api(
     event_id: int,
@@ -130,6 +161,7 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    # ✅ list_active_events must include ended events so Past tab can show them
     return await list_active_events(db)
 
 
@@ -156,7 +188,6 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # NOTE: In your current design submission_id == ActivitySession.id
     session_res = await db.execute(
         select(ActivitySession).where(
             ActivitySession.id == submission_id,

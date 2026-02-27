@@ -66,12 +66,9 @@ def _ensure_event_window(event: Event) -> None:
         raise HTTPException(status_code=403, detail="Event has not started yet.")
 
     # end window:
-    # - If end_time is datetime (your model), compare now_dt > end_time
-    # - If end_time was ever stored as time (older data), handle safely
     end_val = getattr(event, "end_time", None)
     if end_val:
         if isinstance(end_val, datetime):
-            # end_val is naive datetime in DB
             if now_dt > end_val:
                 raise HTTPException(status_code=403, detail="Event has ended.")
         elif isinstance(end_val, time_type):
@@ -80,7 +77,6 @@ def _ensure_event_window(event: Event) -> None:
 
 
 async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
-    # (Optional: validate content_type in ALLOWED_IMAGE_TYPES)
     return await generate_event_thumbnail_presigned_put(
         filename=filename,
         content_type=content_type,
@@ -107,10 +103,8 @@ async def create_event(db: AsyncSession, payload):
     end_time_dt = None
     if end_time_raw:
         if isinstance(end_time_raw, datetime):
-            # If someone sends tz-aware, strip tz to avoid asyncpg error
             end_time_dt = end_time_raw.replace(tzinfo=None)
         elif isinstance(end_time_raw, time_type):
-            # Combine event_date + end_time(time) into datetime
             if not event_date:
                 raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
             end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
@@ -120,11 +114,9 @@ async def create_event(db: AsyncSession, payload):
         description=payload.description,
         required_photos=int(payload.required_photos or 3),
         is_active=True,
-
         event_date=event_date,
         start_time=start_time,
         end_time=end_time_dt,
-
         thumbnail_url=getattr(payload, "thumbnail_url", None),
     )
     db.add(event)
@@ -149,8 +141,6 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
         return event  # already ended
 
     event.is_active = False
-
-    # IMPORTANT: DB expects naive datetime (no tzinfo)
     if hasattr(event, "end_time"):
         event.end_time = _now_ist_naive()
 
@@ -160,9 +150,6 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
-    """
-    Hard-delete an event and all its submissions + photos.
-    """
     result = await db.execute(select(Event).where(Event.id == event_id))
     event = result.scalar_one_or_none()
     if event is None:
@@ -203,7 +190,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
-        # if your column is timezone=True, prefer aware UTC
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -235,13 +221,19 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 
 async def list_active_events(db: AsyncSession):
     """
-    Returns active events from today onwards (upcoming + today), using IST date.
+    ✅ IMPORTANT FIX:
+    Return events from today onwards INCLUDING ended ones,
+    so frontend can show them under Past tab.
+
+    Frontend will classify:
+      - Upcoming (date in future OR not started yet)
+      - Ongoing (today + within window + is_active True)
+      - Past (is_active False OR end_time passed)
     """
     today_ist = _now_ist_naive().date()
 
     q = await db.execute(
         select(Event).where(
-            Event.is_active == True,
             Event.event_date != None,
             Event.event_date >= today_ist
         ).order_by(
@@ -254,9 +246,6 @@ async def list_active_events(db: AsyncSession):
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
-    """
-    Registration allowed only on event day + within window + active.
-    """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
 
@@ -298,9 +287,6 @@ async def add_photo(
     seq_no: int,
     image_url: str,
 ):
-    """
-    Adds/updates a photo for EventSubmissionPhoto table.
-    """
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
