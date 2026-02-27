@@ -87,12 +87,13 @@ async def create_event(db: AsyncSession, payload):
 
 async def end_event(db: AsyncSession, event_id: int) -> Event:
     """
-    ✅ Admin ends event now:
+    Admin ends event now:
       - is_active = False
-      - end_time = current IST time (TIME column in DB)
+      - end_time = current IST datetime (TIMESTAMP column)
     """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
+
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
@@ -101,14 +102,13 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
 
     event.is_active = False
 
-    # If your DB end_time is TIME, assign time() not datetime
+    # IMPORTANT: end_time column is TIMESTAMP
     if hasattr(event, "end_time"):
-        event.end_time = _now_ist().time()
+        event.end_time = _now_ist()  # full datetime
 
     await db.commit()
     await db.refresh(event)
     return event
-
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
     """
