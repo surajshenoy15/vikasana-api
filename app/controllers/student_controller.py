@@ -1,9 +1,9 @@
 import os
 import csv
 import io
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.student import Student, StudentType
@@ -35,25 +35,46 @@ def _coerce_student_type(v) -> StudentType:
     return _parse_student_type(str(v))
 
 
-async def create_student(db: AsyncSession, payload: StudentCreate, faculty_college: str) -> Student:
+def _normalize_csv_headers(fieldnames: list[str] | None) -> tuple[dict[str, str], set[str]]:
+    """
+    Returns:
+      field_map: normalized_lower_header -> original_header
+      headers: set of normalized_lower_header
+    """
+    if not fieldnames:
+        return {}, set()
+    field_map = {h.strip().lower(): h for h in fieldnames if h and h.strip()}
+    return field_map, set(field_map.keys())
+
+
+async def create_student(
+    db: AsyncSession,
+    payload: StudentCreate,
+    *,
+    faculty_college: str,
+    faculty_id: int | None = None,  # ✅ NEW (mentor)
+) -> Student:
     faculty_college = (faculty_college or "").strip()
     if not faculty_college:
         raise ValueError("Faculty college is missing. Please set faculty.college.")
 
-    # ✅ duplicate by USN within same college
-    existing = await db.execute(
-        select(Student).where(Student.usn == payload.usn, Student.college == faculty_college)
-    )
-    if existing.scalar_one_or_none():
-        raise ValueError(f"Duplicate USN in this college: {payload.usn}")
+    usn = payload.usn.strip()
+    email = str(payload.email).strip().lower() if payload.email else None
 
-    # ✅ duplicate by email within same college (only if provided)
-    if payload.email:
-        e2 = await db.execute(
-            select(Student).where(Student.email == str(payload.email), Student.college == faculty_college)
-        )
-        if e2.scalar_one_or_none():
-            raise ValueError(f"Duplicate Email in this college: {payload.email}")
+    # ✅ duplicate by USN/email within same college (single query)
+    dup_stmt = select(Student).where(
+        Student.college == faculty_college,
+        or_(
+            Student.usn == usn,
+            Student.email == email if email else False,
+        ),
+    )
+    existing = (await db.execute(dup_stmt)).scalar_one_or_none()
+    if existing:
+        # make message clearer
+        if existing.usn == usn:
+            raise ValueError(f"Duplicate USN in this college: {usn}")
+        raise ValueError(f"Duplicate Email in this college: {email}")
 
     stype = _coerce_student_type(payload.student_type)
     required_points = _required_points_for_type(stype)
@@ -61,9 +82,9 @@ async def create_student(db: AsyncSession, payload: StudentCreate, faculty_colle
     s = Student(
         college=faculty_college,  # ✅ enforce from faculty, not from client
         name=payload.name.strip(),
-        usn=payload.usn.strip(),
+        usn=usn,
         branch=payload.branch.strip(),
-        email=str(payload.email) if payload.email else None,
+        email=email,
         student_type=stype,
 
         # ✅ NEW FIELDS (Activity Tracker)
@@ -72,6 +93,9 @@ async def create_student(db: AsyncSession, payload: StudentCreate, faculty_colle
 
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
+
+        # ✅ THIS enables Faculty Mentor name in UI
+        created_by_faculty_id=faculty_id,
     )
     db.add(s)
     await db.commit()
@@ -94,12 +118,16 @@ async def create_students_from_csv(
     skip_duplicates: bool = True,
     *,
     faculty_college: str,
+    faculty_id: int | None = None,  # ✅ NEW (mentor)
 ) -> Tuple[int, int, int, int, List[str]]:
     """
     CSV headers expected (required):
       name, usn, branch, passout_year, admitted_year
     Optional:
       email, student_type
+
+    ✅ Headers are case-insensitive (Email/email/EMAIL supported).
+    ✅ created_by_faculty_id is set for mentor name in UI.
     """
     faculty_college = (faculty_college or "").strip()
     if not faculty_college:
@@ -116,12 +144,13 @@ async def create_students_from_csv(
         text = csv_bytes.decode("utf-8", errors="replace")
 
     reader = csv.DictReader(io.StringIO(text))
-    required = {"name", "usn", "branch", "passout_year", "admitted_year"}
 
     if not reader.fieldnames:
         return (0, 0, 0, 0, ["CSV has no headers. Required: name, usn, branch, passout_year, admitted_year"])
 
-    headers = set([h.strip() for h in reader.fieldnames])
+    field_map, headers = _normalize_csv_headers(reader.fieldnames)
+
+    required = {"name", "usn", "branch", "passout_year", "admitted_year"}
     missing = required - headers
     if missing:
         return (0, 0, 0, 0, [f"Missing headers: {', '.join(sorted(missing))}"])
@@ -129,40 +158,35 @@ async def create_students_from_csv(
     rows = list(reader)
     total_rows = len(rows)
 
+    # ✅ preload existing USNs/emails for this college (performance + correct)
+    existing_rows = (await db.execute(select(Student.usn, Student.email).where(Student.college == faculty_college))).all()
+    existing_usns = {r[0] for r in existing_rows if r[0]}
+    existing_emails = {str(r[1]).lower() for r in existing_rows if r[1]}
+
     for idx, row in enumerate(rows, start=2):
         try:
-            name = _clean(row.get("name"))
-            usn = _clean(row.get("usn"))
-            branch = _clean(row.get("branch"))
-            passout_year = int(_clean(row.get("passout_year")))
-            admitted_year = int(_clean(row.get("admitted_year")))
+            # Read required fields using normalized headers
+            name = _clean(row.get(field_map["name"], ""))
+            usn = _clean(row.get(field_map["usn"], ""))
+            branch = _clean(row.get(field_map["branch"], ""))
 
-            email = _clean(row.get("email")) if "email" in headers else ""
-            stype_raw = _clean(row.get("student_type")) if "student_type" in headers else ""
+            passout_year = int(_clean(row.get(field_map["passout_year"], "")))
+            admitted_year = int(_clean(row.get(field_map["admitted_year"], "")))
+
+            # Optional
+            email = _clean(row.get(field_map.get("email", ""), "")).lower() if "email" in headers else ""
+            stype_raw = _clean(row.get(field_map.get("student_type", ""), "")).upper() if "student_type" in headers else ""
 
             if not name or not usn or not branch:
                 raise ValueError("name/usn/branch cannot be empty")
 
-            # ✅ dup USN within same college
-            res = await db.execute(
-                select(Student).where(Student.usn == usn, Student.college == faculty_college)
-            )
-            if res.scalar_one_or_none():
+            # ✅ duplicates within same college (fast set-check)
+            dup = (usn in existing_usns) or (email and email in existing_emails)
+            if dup:
                 if skip_duplicates:
                     skipped += 1
                     continue
-                raise ValueError(f"Duplicate USN in this college: {usn}")
-
-            # ✅ dup Email within same college
-            if email:
-                res2 = await db.execute(
-                    select(Student).where(Student.email == email, Student.college == faculty_college)
-                )
-                if res2.scalar_one_or_none():
-                    if skip_duplicates:
-                        skipped += 1
-                        continue
-                    raise ValueError(f"Duplicate Email in this college: {email}")
+                raise ValueError("Duplicate USN/email in this college")
 
             stype = _parse_student_type(stype_raw)
             required_points = _required_points_for_type(stype)
@@ -181,9 +205,17 @@ async def create_students_from_csv(
 
                 passout_year=passout_year,
                 admitted_year=admitted_year,
+
+                # ✅ THIS enables Faculty Mentor name in UI
+                created_by_faculty_id=faculty_id,
             )
             db.add(s)
             inserted += 1
+
+            # update sets so later rows detect duplicates too
+            existing_usns.add(usn)
+            if email:
+                existing_emails.add(email)
 
         except Exception as e:
             invalid += 1
