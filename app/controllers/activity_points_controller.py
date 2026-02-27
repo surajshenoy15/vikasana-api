@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
-from app.models.activity_types import ActivityType
+from app.models.activity_type import ActivityType
 from app.models.student import Student
 from app.models.student_activity_progress import StudentActivityProgress
 
