@@ -1,17 +1,22 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
-from sqlalchemy import update
-
 
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from sqlalchemy import select, func, delete as sql_delete
+from sqlalchemy import select, func, delete as sql_delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 from app.models.student import Student
+
+# ✅ Activity tracking (for hours & points calculation during event window)
+from app.models.activity_session import ActivitySession, ActivitySessionStatus
+from app.models.activity_type import ActivityType
+
+# ✅ Event ↔ ActivityType mapping
+from app.models.event_activity_type import EventActivityType
 
 # ✅ Certificates
 from app.models.certificate import Certificate, CertificateCounter
@@ -19,9 +24,10 @@ from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
 from app.core.config import settings
 
-# ✅ MinIO upload + presign
+# ✅ MinIO upload
 from app.core.cert_storage import upload_certificate_pdf_bytes
 
+# ✅ Thumbnail presign
 from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -60,11 +66,60 @@ def _ensure_event_window(event: Event) -> None:
     end_val = getattr(event, "end_time", None)
     if end_val:
         if isinstance(end_val, datetime):
-            if now_dt > end_val:
+            if now_dt > end_val.replace(tzinfo=None):
                 raise HTTPException(status_code=403, detail="Event has ended.")
         elif isinstance(end_val, time_type):
             if now_time > end_val:
                 raise HTTPException(status_code=403, detail="Event has ended.")
+
+
+def _event_window_ist_naive(event: Event) -> tuple[datetime, datetime]:
+    """
+    Returns (start_dt, end_dt) as naive datetime representing IST clock time.
+    end_time is stored as naive datetime in DB (TIMESTAMP WITHOUT TZ).
+    """
+    if not getattr(event, "event_date", None):
+        raise HTTPException(status_code=400, detail="Event date not configured.")
+
+    start_t = getattr(event, "start_time", None) or time_type(0, 0)
+    start_dt = datetime.combine(event.event_date, start_t).replace(tzinfo=None)
+
+    end_val = getattr(event, "end_time", None)
+    if not end_val:
+        end_dt = datetime.combine(event.event_date, time_type(23, 59, 59)).replace(tzinfo=None)
+    else:
+        if isinstance(end_val, datetime):
+            end_dt = end_val.replace(tzinfo=None)
+        elif isinstance(end_val, time_type):
+            end_dt = _combine_event_datetime_ist_naive(event.event_date, end_val)
+        else:
+            end_dt = datetime.combine(event.event_date, time_type(23, 59, 59)).replace(tzinfo=None)
+
+    return start_dt, end_dt
+
+
+def _event_out_dict(event: Event) -> dict:
+    """
+    ✅ EventOut schema expects end_time as Optional[time].
+    But DB stores end_time as naive datetime.
+    So convert datetime -> time for API response.
+    """
+    end_val = getattr(event, "end_time", None)
+    end_time = end_val.time() if isinstance(end_val, datetime) else end_val
+
+    return {
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "required_photos": event.required_photos,
+        "is_active": bool(getattr(event, "is_active", True)),
+        "event_date": event.event_date,
+        "start_time": event.start_time,
+        "end_time": end_time,
+        "venue_name": getattr(event, "venue_name", None),
+        "maps_url": getattr(event, "maps_url", None),
+        "thumbnail_url": getattr(event, "thumbnail_url", None),
+    }
 
 
 # =========================================================
@@ -122,9 +177,11 @@ async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetim
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    Generates certificates for all APPROVED submissions of an event.
-    Uploads PDF to MinIO and stores object_key in cert.pdf_path.
+    ✅ Only APPROVED submissions.
+    ✅ 1 certificate per activity_type configured for event.
+    ✅ Uses ActivitySession to compute hours inside event window.
     """
+    # 1) approved participants
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -135,60 +192,92 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
+    # 2) activity types attached to this event
+    aq = await db.execute(
+        select(EventActivityType.activity_type_id).where(EventActivityType.event_id == event.id)
+    )
+    activity_type_ids = [r[0] for r in aq.all()]
+    if not activity_type_ids:
+        return 0
+
+    start_dt, end_dt = _event_window_ist_naive(event)
+
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_naive()
     academic_year = _academic_year_from_date(now_ist)
 
     issued = 0
+
     for sub in submissions:
-        # Skip if already issued for this submission
-        exists = await db.execute(select(Certificate).where(Certificate.submission_id == sub.id))
-        if exists.scalar_one_or_none():
-            continue
-
-        cert_no = await _next_certificate_no(db, academic_year, now_ist)
-
         # Fetch student
         sq = await db.execute(select(Student).where(Student.id == sub.student_id))
         student = sq.scalar_one_or_none()
-
         student_name = getattr(student, "name", None) or getattr(student, "student_name", None) or "Student"
         usn = getattr(student, "usn", None) or ""
 
-        activity_type = getattr(event, "title", None) or "Social Activity"
+        for at_id in activity_type_ids:
+            # Skip if already issued for this submission + activity type
+            ex = await db.execute(
+                select(Certificate).where(
+                    Certificate.submission_id == sub.id,
+                    Certificate.activity_type_id == at_id,
+                )
+            )
+            if ex.scalar_one_or_none():
+                continue
 
-        # Optional: if you store points/hours on submission, use them; else keep 0 for now
-        hours = float(getattr(sub, "total_hours", 0) or 0)
-        points = int(getattr(sub, "points_awarded", 0) or 0)
+            # hours for that type inside event window
+            hrs_q = await db.execute(
+                select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
+                    ActivitySession.student_id == sub.student_id,
+                    ActivitySession.activity_type_id == at_id,
+                    ActivitySession.started_at >= start_dt,
+                    ActivitySession.started_at <= end_dt,
+                    ActivitySession.status == ActivitySessionStatus.APPROVED,
+                )
+            )
+            hours = float(hrs_q.scalar() or 0.0)
 
-        cert = Certificate(
-            certificate_no=cert_no,
-            submission_id=sub.id,
-            student_id=sub.student_id,
-            event_id=event.id,
-            issued_at=now_utc,
-        )
-        db.add(cert)
-        await db.flush()  # cert.id available
+            # points rule: 2 points per 1 hour per activity type
+            points = int(hours * 2)
 
-        sig = sign_cert(cert.id)
-        verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
+            # activity type name
+            atq = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
+            at = atq.scalar_one_or_none()
+            activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
 
-        pdf_bytes = build_certificate_pdf(
-            certificate_no=cert_no,
-            issue_date=now_ist.strftime("%d.%m.%Y"),
-            student_name=student_name,
-            usn=usn,
-            activity_type=activity_type,
-            verify_url=verify_url,
-        )
+            cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
-        # ✅ Upload to MinIO and store object key in pdf_path
-        object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
-        cert.pdf_path = object_key
+            cert = Certificate(
+                certificate_no=cert_no,
+                submission_id=sub.id,
+                student_id=sub.student_id,
+                event_id=event.id,
+                activity_type_id=at_id,
+                issued_at=now_utc,
+            )
+            db.add(cert)
+            await db.flush()  # cert.id available
 
-        issued += 1
+            sig = sign_cert(cert.id)
+            verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
 
+            # NOTE: if you want hours/points printed, update build_certificate_pdf signature
+            pdf_bytes = build_certificate_pdf(
+                certificate_no=cert_no,
+                issue_date=now_ist.strftime("%d.%m.%Y"),
+                student_name=student_name,
+                usn=usn,
+                activity_type=activity_type_name,
+                verify_url=verify_url,
+            )
+
+            object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
+            cert.pdf_path = object_key
+
+            issued += 1
+
+    await db.commit()
     return issued
 
 
@@ -210,11 +299,8 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 
 async def create_event(db: AsyncSession, payload):
     """
-    Handles payload.end_time being either:
-      - time (preferred from UI), OR
-      - datetime (rare)
-
-    We store end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
+    Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
+    Also stores selected activity_type_ids into event_activity_types table.
     """
     event_date = getattr(payload, "event_date", None)
     start_time = getattr(payload, "start_time", None)
@@ -247,10 +333,23 @@ async def create_event(db: AsyncSession, payload):
     db.add(event)
     await db.commit()
     await db.refresh(event)
-    return event
+
+    # ✅ save selected activity types for this event
+    for at_id in getattr(payload, "activity_type_ids", []) or []:
+        db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
+
+    await db.commit()
+    await db.refresh(event)
+
+    return _event_out_dict(event)
 
 
 async def end_event(db: AsyncSession, event_id: int):
+    """
+    ✅ End event
+    ✅ Expire in_progress registrations
+    ✅ Generate certificates ONLY for APPROVED submissions (per activity type)
+    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -263,27 +362,17 @@ async def end_event(db: AsyncSession, event_id: int):
             EventSubmission.event_id == event_id,
             EventSubmission.status == "in_progress",
         )
-        .values(status="expired")  # or "rejected"
+        .values(status="expired")
     )
 
     await db.commit()
-    await db.refresh(event)  # ✅ make sure latest is_active is loaded
+    await db.refresh(event)
 
-    # ✅ Return fields that match EventOut
-    return {
-        "id": event.id,
-        "title": event.title,
-        "description": event.description,
-        "required_photos": event.required_photos,
-        "is_active": event.is_active,
-        "event_date": event.event_date,
-        "start_time": event.start_time,
-        "end_time": event.end_time,
-        "venue_name": event.venue_name,
-        "maps_url": event.maps_url,
-        "thumbnail_url": event.thumbnail_url,
-        "created_at": event.created_at,
-    }
+    # ✅ generate certificates now
+    await _issue_certificates_for_event(db, event)
+
+    await db.refresh(event)
+    return _event_out_dict(event)
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
@@ -291,6 +380,9 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     event = result.scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # delete mapping rows
+    await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
 
     sub_result = await db.execute(
         select(EventSubmission.id).where(EventSubmission.event_id == event_id)
@@ -369,7 +461,9 @@ async def list_active_events(db: AsyncSession):
             Event.id.desc()
         )
     )
-    return q.scalars().all()
+    events = q.scalars().all()
+    # ✅ convert end_time for response safety
+    return [_event_out_dict(e) for e in events]
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):

@@ -1,6 +1,7 @@
 # =========================================================
-# app/schemas/events.py  ✅ FULL UPDATED (WITH LOCATION)
+# app/schemas/events.py  ✅ FULL UPDATED (WITH LOCATION + ACTIVITY TYPES)
 # =========================================================
+
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, date, time
@@ -21,6 +22,10 @@ class EventCreateIn(BaseModel):
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
 
+    # ✅ NEW (Admin selects these activity types for the event)
+    # Example: [1, 5] => Energy conservation + Rural product marketing
+    activity_type_ids: List[int] = []
+
 
 class EventOut(BaseModel):
     id: int
@@ -36,6 +41,11 @@ class EventOut(BaseModel):
     # ✅ NEW (Location)
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
+
+    # NOTE:
+    # We don't force EventOut to include activity_type_ids,
+    # because Event table doesn't store it directly (mapping table does).
+    # If you want it in response, we can create a separate EventOutAdmin schema.
 
     class Config:
         from_attributes = True
@@ -105,7 +115,7 @@ class AdminSubmissionOut(BaseModel):
     approved_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
 
-    # ✅ ADD THESE
+    # ✅ Face/flag meta
     face_matched: Optional[bool] = None
     face_reason: Optional[str] = None
     cosine_score: Optional[float] = None

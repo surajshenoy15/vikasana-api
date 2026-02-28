@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete as sql_delete
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
@@ -15,6 +15,9 @@ from app.core.activity_storage import upload_activity_image
 from app.models.activity_session import ActivitySession
 from app.models.activity_photo import ActivityPhoto
 from app.models.events import Event
+
+# ✅ NEW: event ↔ activity_type mapping
+from app.models.event_activity_type import EventActivityType
 
 from app.schemas.events import (
     EventCreateIn,
@@ -32,7 +35,7 @@ from app.schemas.events import (
 from app.controllers.events_controller import (
     create_event,
     delete_event,
-    list_active_events,   # ✅ controller must return ended too
+    list_active_events,
     register_for_event,
     final_submit,
     list_event_submissions,
@@ -51,9 +54,11 @@ router = APIRouter(tags=["Events"])
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
     # represents IST clock time but stored naive
     return datetime.combine(event_date, t).replace(tzinfo=None)
+
 
 def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
     """
@@ -76,6 +81,30 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
     raise HTTPException(status_code=422, detail="Invalid end_time type")
 
 
+def _event_out_dict(ev: Event) -> dict:
+    """
+    ✅ EventOut expects end_time as Optional[time]
+    But DB stores end_time as Optional[datetime]
+    Convert datetime -> time for API response.
+    """
+    end_val = getattr(ev, "end_time", None)
+    end_time = end_val.time() if isinstance(end_val, datetime) else end_val
+
+    return {
+        "id": ev.id,
+        "title": ev.title,
+        "description": ev.description,
+        "required_photos": ev.required_photos,
+        "is_active": bool(getattr(ev, "is_active", True)),
+        "event_date": ev.event_date,
+        "start_time": ev.start_time,
+        "end_time": end_time,
+        "thumbnail_url": ev.thumbnail_url,
+        "venue_name": getattr(ev, "venue_name", None),
+        "maps_url": getattr(ev, "maps_url", None),
+    }
+
+
 # ══════════════════════════════════════════════
 # ADMIN — Events CRUD
 # ══════════════════════════════════════════════
@@ -86,7 +115,7 @@ async def admin_create_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # ✅ create_event controller now stores venue_name + maps_url too
+    # ✅ create_event controller stores venue_name + maps_url + activity_type_ids mapping
     return await create_event(db, payload)
 
 
@@ -127,13 +156,18 @@ async def admin_update_event_api(
     # ✅ thumbnail
     ev.thumbnail_url = payload.thumbnail_url
 
-    # ✅ NEW: location fields (save to DB)
+    # ✅ location
     ev.venue_name = (payload.venue_name or "").strip() or None
     ev.maps_url = (payload.maps_url or "").strip() or None
 
+    # ✅ NEW: replace event activity types mapping
+    await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
+    for at_id in getattr(payload, "activity_type_ids", []) or []:
+        db.add(EventActivityType(event_id=event_id, activity_type_id=int(at_id)))
+
     await db.commit()
     await db.refresh(ev)
-    return ev
+    return _event_out_dict(ev)
 
 
 @router.delete("/admin/events/{event_id}", status_code=204)
@@ -163,10 +197,10 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
+    # controller returns list[dict] already (safe for end_time)
     return await list_active_events(db)
 
 
-# ✅ NEW: fetch single event (for History -> View details screen)
 @router.get("/student/events/{event_id}", response_model=EventOut)
 async def student_event_detail(
     event_id: int,
@@ -177,7 +211,7 @@ async def student_event_detail(
     ev = res.scalar_one_or_none()
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-    return ev
+    return _event_out_dict(ev)
 
 
 @router.post("/student/events/{event_id}/register", response_model=RegisterOut)
