@@ -348,10 +348,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     ✅ Only APPROVED event_submissions
     ✅ 1 certificate per activity_type for event
     ✅ If event has no mapping, infer activity types from approved sessions inside event window
-
-    ✅ REGEN SAFE:
-       - If certificate already exists: DO NOT change issued_at / certificate_no
-       - Just rebuild PDF and overwrite pdf_path
     """
     q = await db.execute(
         select(EventSubmission).where(
@@ -363,8 +359,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
+    # ✅ mapped activity types
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
 
+    # ✅ fallback if mapping missing: infer from sessions in event window
     if not activity_type_ids:
         start_utc, end_utc = _event_window_utc(event)
         aq = await db.execute(
@@ -386,6 +384,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     now_ist = _now_ist_naive()
     academic_year = _academic_year_from_date(now_ist)
 
+    # ✅ Venue name from admin event form
     venue_name = (
         getattr(event, "venue_name", None)
         or getattr(event, "venue", None)
@@ -393,7 +392,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         or ""
     ).strip() or "N/A"
 
-    regenerated = 0
+    issued = 0
 
     for sub in submissions:
         sq = await db.execute(select(Student).where(Student.id == sub.student_id))
@@ -405,16 +404,16 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = getattr(student, "usn", None) or ""
 
         for at_id in activity_type_ids:
-            # ✅ fetch existing cert if any
+            # skip if already issued
             ex = await db.execute(
                 select(Certificate).where(
                     Certificate.submission_id == sub.id,
                     Certificate.activity_type_id == at_id,
                 )
             )
-            cert = ex.scalar_one_or_none()
+            if ex.scalar_one_or_none():
+                continue
 
-            # ✅ compute hours inside event window
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -432,7 +431,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             at = atq.scalar_one_or_none()
             activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
 
-            # ✅ points calculation (keep your original logic)
+            # ✅ Decide activity points:
+            # If ActivityType has points_per_unit + hours_per_unit, compute; else fallback.
             points_awarded = 0
             ppu = getattr(at, "points_per_unit", None)
             hpu = getattr(at, "hours_per_unit", None)
@@ -443,30 +443,25 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 except Exception:
                     points_awarded = int(ppu) if ppu is not None else 0
             else:
+                # fallback if you have a fixed points field
                 points_awarded = int(getattr(at, "points", 0) or 0)
 
-            # ✅ create certificate only if missing
-            if cert is None:
-                cert_no = await _next_certificate_no(db, academic_year, now_ist)
-                cert = Certificate(
-                    certificate_no=cert_no,
-                    submission_id=sub.id,
-                    student_id=sub.student_id,
-                    event_id=event.id,
-                    activity_type_id=at_id,
-                    issued_at=now_utc,  # only for new certs
-                )
-                db.add(cert)
-                await db.flush()
+            cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
-            # ✅ IMPORTANT: do not change issued_at for existing certs
-            issue_date_str = (
-                cert.issued_at.date().isoformat()
-                if cert.issued_at
-                else now_ist.date().isoformat()
+            cert = Certificate(
+                certificate_no=cert_no,
+                submission_id=sub.id,
+                student_id=sub.student_id,
+                event_id=event.id,
+                activity_type_id=at_id,
+                issued_at=now_utc,
             )
+            db.add(cert)
+            await db.flush()
 
+            # ✅ Sign using certificate_no (NOT cert.id)
             sig = sign_cert(cert.certificate_no)
+
             verify_url = (
                 f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
@@ -475,22 +470,22 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             pdf_bytes = build_certificate_pdf(
                 template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH,
                 certificate_no=cert.certificate_no,
-                issue_date=issue_date_str,
+                issue_date=(cert.issued_at.date().isoformat() if cert.issued_at else now_ist.date().isoformat()),
                 student_name=student_name,
                 usn=usn,
                 activity_type=activity_type_name,
-                venue_name=venue_name,
-                activity_points=int(points_awarded),
+                venue_name=venue_name,                 # ✅ admin Venue Name
+                activity_points=int(points_awarded),   # ✅ points on certificate
                 verify_url=verify_url,
             )
 
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
 
-            regenerated += 1
+            issued += 1
 
     await db.commit()
-    return regenerated
+    return issued
 
 
 # =========================================================
