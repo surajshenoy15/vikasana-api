@@ -206,6 +206,15 @@ async def admin_auto_approve_event(
 ):
     return await auto_approve_event_from_sessions(db, event_id)
 
+@router.get("/admin/events", response_model=list[EventOut])
+async def admin_list_events_api(
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    res = await db.execute(select(Event).order_by(Event.id.desc()))
+    events = res.scalars().all()
+    return [_event_out_dict(ev) for ev in events]
+
 # ══════════════════════════════════════════════
 # STUDENT — Events
 # ══════════════════════════════════════════════
