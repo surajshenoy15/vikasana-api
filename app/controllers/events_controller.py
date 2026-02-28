@@ -503,14 +503,32 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 
 async def create_event(db: AsyncSession, payload):
+    # ✅ DEBUG LOGS (ADD THIS)
+    try:
+        print("=== CREATE EVENT DEBUG ===")
+        print("Payload type:", type(payload))
+        # Pydantic v1/v2 safe dump
+        if hasattr(payload, "model_dump"):
+            print("Payload dict:", payload.model_dump())
+        elif hasattr(payload, "dict"):
+            print("Payload dict:", payload.dict())
+        else:
+            print("Payload raw:", payload)
+
+        print("activity_type_ids:", getattr(payload, "activity_type_ids", None))
+        print("activity_list:", getattr(payload, "activity_list", None))
+
+        # very important: see OTHER possible keys frontend might send
+        for k in ["activity_types", "activityTypeIds", "activityTypes", "activity_type_id", "activity_type"]:
+            print(f"{k}:", getattr(payload, k, None))
+
+        print("==========================")
+    except Exception as e:
+        print("CREATE EVENT DEBUG FAILED:", e)
+
     """
     Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
     Also stores selected activity types into event_activity_types table.
-
-    ✅ Supports BOTH:
-      - payload.activity_type_ids: [1,2,3]
-      - payload.activity_list: ["Tree Plantation", "Blood Donation"]
-    ✅ Accepts time fields from payload: start_time/end_time OR event_time/time
     """
     event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
     start_time = getattr(payload, "start_time", None) or getattr(payload, "event_time", None) or getattr(payload, "time", None)
@@ -546,7 +564,6 @@ async def create_event(db: AsyncSession, payload):
 
     # ─────────────────────────────────────────────────────
     # ✅ Save selected activity types for this event
-    # Supports ids and/or names
     # ─────────────────────────────────────────────────────
 
     ids: list[int] = []
@@ -557,12 +574,14 @@ async def create_event(db: AsyncSession, payload):
         except Exception:
             pass
 
-    # Fallback: activity_list contains names from frontend
     if not ids:
         names = [str(x).strip() for x in (getattr(payload, "activity_list", None) or []) if str(x).strip()]
         if names:
             rq = await db.execute(select(ActivityType.id).where(ActivityType.name.in_(names)))
             ids = [int(r[0]) for r in rq.all()]
+
+    # ✅ DEBUG: show what IDs we will save
+    print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
 
     for at_id in sorted(set(ids)):
         db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
