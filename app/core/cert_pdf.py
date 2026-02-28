@@ -3,6 +3,7 @@ import qrcode
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader  # ✅ add
 
 
 def build_certificate_pdf(
@@ -52,7 +53,9 @@ def build_certificate_pdf(
     qr_buf.seek(0)
 
     qr_size = 32 * mm
-    c.drawImage(qr_buf, w - margin - qr_size, margin + 10 * mm, qr_size, qr_size, mask="auto")
+    qr_img = ImageReader(qr_buf)  # ✅ wrap BytesIO
+    c.drawImage(qr_img, w - margin - qr_size, margin + 10 * mm, qr_size, qr_size, mask="auto")
+
     c.setFont("Times-Roman", 8)
     c.drawRightString(w - margin, margin + 7 * mm, "Scan QR to verify")
 
