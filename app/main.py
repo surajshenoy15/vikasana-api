@@ -19,36 +19,25 @@ from app.routes.auth import router as auth_router
 from app.routes.faculty import router as faculty_main_router
 from app.routes.student_auth import router as student_auth_router
 from app.routes.activity_summary import router as activity_summary_router
-
-# ✅ EVENTS router (admin + student events)
 from app.routes.events import router as events_router
-
-# activity routers (student + admin)
-from app.routes.activity import router as student_activity_router
-from app.routes.activity import admin_router as admin_activity_router
-from app.routes.activity import legacy_router as student_legacy_router
-
-# students routers
+from app.routes.activity import (
+    router as student_activity_router,
+    admin_router as admin_activity_router,
+    legacy_router as student_legacy_router,
+)
 from app.routes.students import (
     faculty_router as faculty_students_router,
     admin_router as admin_students_router,
     student_router as student_profile_router,
 )
-
-# face router
 from app.routes.face_routes import router as face_router
-
-# ✅ admin sessions router
 from app.routes.admin_sessions import router as admin_sessions_router
-
-# ✅ activity types router (NEW)
 from app.routes.activity_types import router as activity_types_router
-
-# ✅ certificates routers (NEW)
 from app.routes.public_certificates import router as public_certificates_router
 from app.routes.student_certificates import router as student_certificates_router
 
 
+# ───────────────── APP INIT ─────────────────
 app = FastAPI(
     title="Vikasana Foundation API",
     description="Backend API for the Vikasana Admin Panel",
@@ -58,6 +47,7 @@ app = FastAPI(
 )
 
 
+# ───────────────── SANITIZER ─────────────────
 def _sanitize(obj):
     if isinstance(obj, (bytes, bytearray)):
         return f"<bytes:{len(obj)}>"
@@ -77,21 +67,50 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-# ───────────────── CORS ─────────────────
-origins = settings.origins_list or [
+# ───────────────── CORS CONFIG ─────────────────
+
+# Default allowed origins
+default_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+
+    "http://31.97.230.171",
     "http://31.97.230.171:3000",
     "http://31.97.230.171:5173",
+
+    "https://31.97.230.171",
+    "https://31.97.230.171:3000",
+    "https://31.97.230.171:5173",
 ]
+
+# Merge with origins from .env (if provided)
+origins = set(default_origins)
+
+if settings.origins_list:
+    origins.update(
+        [o.strip() for o in settings.origins_list if o and o.strip()]
+    )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=list(origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ───────────────── DEBUG ORIGIN LOGGER (TEMPORARY) ─────────────────
+@app.middleware("http")
+async def log_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if origin:
+        print(f"🌍 ORIGIN: {origin} | PATH: {request.url.path}")
+    response = await call_next(request)
+    return response
+
 
 # ───────────────── ROUTES ─────────────────
 app.include_router(auth_router, prefix="/api")
@@ -107,33 +126,25 @@ app.include_router(student_activity_router, prefix="/api")
 app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
-# ✅ Admin Sessions
-app.include_router(admin_sessions_router, prefix="/api")  # -> /api/admin/sessions
-
-# ✅ Activity Types (NEW)
-# Public:  GET  /api/activity-types
-# Admin:   POST /api/activity-types
-#         PATCH/GET/DELETE /api/activity-types/{id}
+app.include_router(admin_sessions_router, prefix="/api")
 app.include_router(activity_types_router, prefix="/api")
-
-# ✅ Events (admin + student)
-# includes: /api/admin/events/{id}/end  and /api/student/events etc
 app.include_router(events_router, prefix="/api")
 
-# ✅ Certificates (NEW)
-# Public verify:   GET /api/public/certificates/verify?cert_id=&sig=
-# Student link:    GET /api/student/certificates/{session_id}/download-url
 app.include_router(public_certificates_router, prefix="/api")
 app.include_router(student_certificates_router, prefix="/api")
 
-# Other
 app.include_router(activity_summary_router, prefix="/api")
-app.include_router(face_router, prefix="/api")  # -> /api/face/...
+app.include_router(face_router, prefix="/api")
+
 
 # ───────────────── HEALTH ─────────────────
 @app.get("/", tags=["Health"])
 async def root():
-    return {"status": "ok", "app": "Vikasana Foundation API", "env": settings.APP_ENV}
+    return {
+        "status": "ok",
+        "app": "Vikasana Foundation API",
+        "env": settings.APP_ENV,
+    }
 
 
 @app.get("/health", tags=["Health"])
