@@ -450,15 +450,40 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
 
 async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
     """
-    Manual regen: generates missing certs for all APPROVED submissions.
-    (If you use auto_approve, call that first, then regen is optional.)
+    ✅ NEW behavior (as you asked):
+    - Only allow when event is ENDED (is_active = False)
+    - Auto-approve submissions from APPROVED face sessions
+    - Then generate certificates for all approved submissions
     """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-    issued = await _issue_certificates_for_event(db, event)
-    return {"event_id": event_id, "issued": issued}
 
+    # 🔒 Enforce "End first, then generate"
+    if bool(getattr(event, "is_active", True)):
+        raise HTTPException(status_code=400, detail="End the event first, then generate certificates")
+
+    # 1) Auto-approve from face-approved sessions (this also issues certs currently)
+    result = await auto_approve_event_from_sessions(db, event_id)
+
+    # NOTE: auto_approve_event_from_sessions already calls _issue_certificates_for_event
+    # So certificates are already generated here.
+    # But to be extra safe, you can also call issue again (it will skip duplicates):
+    # issued_extra = await _issue_certificates_for_event(db, event)
+    # result["certificates_issued"] += issued_extra
+
+    if int(result.get("certificates_issued", 0)) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No certificates generated. Ensure face-approved sessions exist within the event time window and activity type mapping is set.",
+        )
+
+    return {
+        "event_id": event_id,
+        "eligible_students": result.get("eligible_students", 0),
+        "submissions_approved": result.get("submissions_approved", 0),
+        "certificates_issued": result.get("certificates_issued", 0),
+    }
 
 # =========================================================
 # ---------------------- THUMBNAIL -------------------------
