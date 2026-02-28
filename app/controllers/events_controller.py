@@ -40,6 +40,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # =========================================================
 
 def _now_ist_naive() -> datetime:
+    # IST clock-time, tzinfo removed because your Event.end_time is stored as naive
     return datetime.now(IST).replace(tzinfo=None)
 
 
@@ -97,6 +98,21 @@ def _event_window_ist_naive(event: Event) -> tuple[datetime, datetime]:
             end_dt = datetime.combine(event.event_date, time_type(23, 59, 59)).replace(tzinfo=None)
 
     return start_dt, end_dt
+
+
+# ✅ NEW: convert IST-naive -> UTC-aware for comparing with ActivitySession timestamps (usually UTC aware)
+def _ist_naive_to_utc_aware(dt_naive_ist: datetime) -> datetime:
+    """
+    Treat dt_naive_ist as IST clock time and convert to UTC aware.
+    Example: 2026-02-28 10:00 (IST naive) -> 2026-02-28 04:30+00:00
+    """
+    return dt_naive_ist.replace(tzinfo=IST).astimezone(timezone.utc)
+
+
+# ✅ NEW: event window in UTC aware
+def _event_window_utc(event: Event) -> tuple[datetime, datetime]:
+    start_ist_naive, end_ist_naive = _event_window_ist_naive(event)
+    return _ist_naive_to_utc_aware(start_ist_naive), _ist_naive_to_utc_aware(end_ist_naive)
 
 
 def _event_out_dict(event: Event) -> dict:
@@ -193,18 +209,22 @@ async def _eligible_students_from_sessions(
     - Have ActivitySession APPROVED (face verified)
     - Session.activity_type_id in event's mapped activity_type_ids
     - Session.started_at within event window
+
+    ✅ IMPORTANT FIX:
+    ActivitySession.started_at is usually UTC-aware.
+    So compare against event window converted to UTC-aware.
     """
     if not activity_type_ids:
         return []
 
-    start_dt, end_dt = _event_window_ist_naive(event)
+    start_utc, end_utc = _event_window_utc(event)
 
     q = await db.execute(
         select(func.distinct(ActivitySession.student_id)).where(
             ActivitySession.status == ActivitySessionStatus.APPROVED,
             ActivitySession.activity_type_id.in_(activity_type_ids),
-            ActivitySession.started_at >= start_dt,
-            ActivitySession.started_at <= end_dt,
+            ActivitySession.started_at >= start_utc,
+            ActivitySession.started_at <= end_utc,
         )
     )
     return [int(r[0]) for r in q.all() if r and r[0] is not None]
@@ -290,6 +310,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     ✅ 1 certificate per activity_type configured for event.
     ✅ Uses ActivitySession to compute hours inside event window.
     ✅ Skips if hours == 0 (no certificate).
+
+    ✅ IMPORTANT FIX:
+    Use event window in UTC-aware when filtering ActivitySession.started_at.
     """
     # approved participants
     q = await db.execute(
@@ -307,7 +330,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not activity_type_ids:
         return 0
 
-    start_dt, end_dt = _event_window_ist_naive(event)
+    start_utc, end_utc = _event_window_utc(event)
 
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_naive()
@@ -338,8 +361,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
                     ActivitySession.activity_type_id == at_id,
-                    ActivitySession.started_at >= start_dt,
-                    ActivitySession.started_at <= end_dt,
+                    ActivitySession.started_at >= start_utc,
+                    ActivitySession.started_at <= end_utc,
                     ActivitySession.status == ActivitySessionStatus.APPROVED,
                 )
             )
