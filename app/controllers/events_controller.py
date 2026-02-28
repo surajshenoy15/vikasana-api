@@ -348,6 +348,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     ✅ Only APPROVED event_submissions
     ✅ 1 certificate per activity_type for event
     ✅ If event has no mapping, infer activity types from approved sessions inside event window
+    ✅ REGENERATE MODE: if certificate already exists, re-build PDF + overwrite pdf_path (no new cert_no)
     """
     q = await db.execute(
         select(EventSubmission).where(
@@ -404,16 +405,16 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = getattr(student, "usn", None) or ""
 
         for at_id in activity_type_ids:
-            # skip if already issued
+            # ✅ fetch existing certificate (if any) — do NOT skip
             ex = await db.execute(
                 select(Certificate).where(
                     Certificate.submission_id == sub.id,
                     Certificate.activity_type_id == at_id,
                 )
             )
-            if ex.scalar_one_or_none():
-                continue
+            cert = ex.scalar_one_or_none()
 
+            # ✅ calculate hours inside event window
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -432,7 +433,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
 
             # ✅ Decide activity points:
-            # If ActivityType has points_per_unit + hours_per_unit, compute; else fallback.
             points_awarded = 0
             ppu = getattr(at, "points_per_unit", None)
             hpu = getattr(at, "hours_per_unit", None)
@@ -443,21 +443,24 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 except Exception:
                     points_awarded = int(ppu) if ppu is not None else 0
             else:
-                # fallback if you have a fixed points field
                 points_awarded = int(getattr(at, "points", 0) or 0)
 
-            cert_no = await _next_certificate_no(db, academic_year, now_ist)
-
-            cert = Certificate(
-                certificate_no=cert_no,
-                submission_id=sub.id,
-                student_id=sub.student_id,
-                event_id=event.id,
-                activity_type_id=at_id,
-                issued_at=now_utc,
-            )
-            db.add(cert)
-            await db.flush()
+            # ✅ Create cert if missing, else re-use existing cert_no
+            if cert is None:
+                cert_no = await _next_certificate_no(db, academic_year, now_ist)
+                cert = Certificate(
+                    certificate_no=cert_no,
+                    submission_id=sub.id,
+                    student_id=sub.student_id,
+                    event_id=event.id,
+                    activity_type_id=at_id,
+                    issued_at=now_utc,
+                )
+                db.add(cert)
+                await db.flush()
+            else:
+                # regen: keep certificate_no same, optionally refresh issued date
+                cert.issued_at = now_utc
 
             # ✅ Sign using certificate_no (NOT cert.id)
             sig = sign_cert(cert.certificate_no)
@@ -474,11 +477,12 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 student_name=student_name,
                 usn=usn,
                 activity_type=activity_type_name,
-                venue_name=venue_name,                 # ✅ admin Venue Name
-                activity_points=int(points_awarded),   # ✅ points on certificate
+                venue_name=venue_name,
+                activity_points=int(points_awarded),
                 verify_url=verify_url,
             )
 
+            # ✅ upload (overwrite pdf_path with new object key)
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
 
