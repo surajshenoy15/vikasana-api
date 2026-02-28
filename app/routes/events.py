@@ -48,7 +48,7 @@ from app.controllers.events_controller import (
     list_student_event_certificates,
     regenerate_event_certificates,
     auto_approve_and_issue_event_certificates, 
-    auto_approve_event_from_sessions # ✅ NEW (top approve button)
+    auto_approve_event_from_sessions, # ✅ NEW (top approve button)
 )
 
 router = APIRouter(tags=["Events"])
