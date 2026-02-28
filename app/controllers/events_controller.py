@@ -390,27 +390,30 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int):
-
-    # 1️⃣ Mark event as ended
+    # 1️⃣ Get event
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    event.is_active = False  # or event.ended_at = datetime.utcnow()
+    # 2️⃣ Mark event as inactive
+    event.is_active = False
 
-    # 2️⃣ Expire ONLY unfinished submissions
+    # 3️⃣ Expire ONLY unfinished submissions
     await db.execute(
         update(EventSubmission)
         .where(
             EventSubmission.event_id == event_id,
-            EventSubmission.status.in_(["IN_PROGRESS", "DRAFT"])
+            EventSubmission.status.in_(["in_progress", "draft"])  # 👈 lowercase (your DB uses lowercase)
         )
-        .values(status="EXPIRED")
+        .values(status="expired")
     )
 
+    # 4️⃣ Commit and refresh
     await db.commit()
+    await db.refresh(event)
 
-    return {"message": "Event ended successfully"}
+    # 5️⃣ Return updated event (must match EventOut schema)
+    return event
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
