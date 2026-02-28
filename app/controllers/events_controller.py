@@ -251,26 +251,39 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int):
-    # 1) get event
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # 2) mark event ended
     event.is_active = False
 
-    # 3) auto-expire all in-progress submissions
     await db.execute(
         update(EventSubmission)
         .where(
             EventSubmission.event_id == event_id,
             EventSubmission.status == "in_progress",
         )
-        .values(status="expired")  # or "rejected" if you prefer
+        .values(status="expired")  # or "rejected"
     )
 
     await db.commit()
-    return {"message": "Event ended and in-progress submissions updated"}
+    await db.refresh(event)  # ✅ make sure latest is_active is loaded
+
+    # ✅ Return fields that match EventOut
+    return {
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "required_photos": event.required_photos,
+        "is_active": event.is_active,
+        "event_date": event.event_date,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "venue_name": event.venue_name,
+        "maps_url": event.maps_url,
+        "thumbnail_url": event.thumbnail_url,
+        "created_at": event.created_at,
+    }
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
