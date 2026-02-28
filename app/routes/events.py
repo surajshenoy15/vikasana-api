@@ -1,6 +1,6 @@
 # app/routes/events.py
 from typing import List
-from datetime import datetime, date as date_type, time as time_type
+from datetime import datetime, date as date_type,time as time_type
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
@@ -31,7 +31,7 @@ from app.schemas.events import (
     ThumbnailUploadUrlOut,
 )
 
-# ✅ certificates schema (your file is certificate.py)
+# ✅ certificates schema
 from app.schemas.certificate import StudentCertificateOut
 
 from app.controllers.events_controller import (
@@ -46,7 +46,8 @@ from app.controllers.events_controller import (
     get_event_thumbnail_upload_url,
     end_event,
     list_student_event_certificates,
-    regenerate_event_certificates,  # ✅ NEW
+    regenerate_event_certificates,
+    auto_approve_and_issue_event_certificates,  # ✅ NEW (top approve button)
 )
 
 router = APIRouter(tags=["Events"])
@@ -57,6 +58,12 @@ def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> da
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
+from datetime import datetime, time as time_type, date as date_type
+from fastapi import HTTPException
+
+def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
+    return datetime.combine(event_date, t).replace(tzinfo=None)
+
 def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
     if end_val is None:
         return None
@@ -66,7 +73,10 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
 
     if isinstance(end_val, time_type):
         if not event_date:
-            raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+            raise HTTPException(
+                status_code=422,
+                detail="event_date is required when end_time is a time value",
+            )
         return _combine_event_datetime_ist_naive(event_date, end_val)
 
     raise HTTPException(status_code=422, detail="Invalid end_time type")
@@ -166,11 +176,25 @@ async def admin_end_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # ✅ Only ends event. No expiry. No auto certificate generation.
     return await end_event(db, event_id)
 
 
-# ✅ Admin manually generates certificates after approvals
+# ✅ One-click: auto approve (face verified) + issue certificates
+@router.post("/admin/events/{event_id}/approve-and-issue")
+async def admin_auto_approve_and_issue(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    """
+    This is the endpoint your TOP "Approve" button should call.
+    It approves students who have face-verified (APPROVED) activity sessions
+    within this event window and generates certificates.
+    """
+    return await auto_approve_and_issue_event_certificates(db, event_id)
+
+
+# ✅ Admin can still regenerate certificates if needed (idempotent)
 @router.post("/admin/events/{event_id}/certificates/regenerate")
 async def admin_regenerate_event_certificates(
     event_id: int,
@@ -205,14 +229,12 @@ async def student_event_detail(
     return _event_out_dict(ev)
 
 
-# ✅ Certificates list for this student + this event
 @router.get("/student/events/{event_id}/certificates", response_model=list[StudentCertificateOut])
 async def student_event_certificates(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ returns [] if none
     return await list_student_event_certificates(db=db, student_id=student.id, event_id=event_id)
 
 
