@@ -1,3 +1,4 @@
+# app/core/cert_pdf.py
 import io
 import qrcode
 from reportlab.pdfgen import canvas
@@ -14,6 +15,8 @@ def _make_overlay_pdf(
     student_name: str,
     usn: str,
     activity_type: str,
+    venue_name: str,          # ✅ NEW
+    activity_points: int,     # ✅ NEW
     verify_url: str,
     page_size=A4,
 ) -> bytes:
@@ -22,17 +25,11 @@ def _make_overlay_pdf(
     c = canvas.Canvas(buf, pagesize=page_size)
     w, h = page_size
 
-    # ----------------------------
-    # ✅ POSITION TUNING (edit these)
-    # ----------------------------
-    # A4 points: width=595, height=842 approx
-    # Your template has header+footer already, so we place content in center area.
-
     # Title
     c.setFont("Times-Bold", 28)
     c.drawCentredString(w / 2, h - 95 * mm, "CERTIFICATE")
 
-    # Certificate number + date (top area under header)
+    # Certificate number + date
     c.setFont("Times-Roman", 11)
     c.drawString(22 * mm, h - 65 * mm, f"Certificate No: {certificate_no}")
     c.drawRightString(w - 22 * mm, h - 65 * mm, f"Date: {issue_date}")
@@ -44,11 +41,14 @@ def _make_overlay_pdf(
         f"{student_name} (USN: {usn})",
         "has successfully completed the social activity",
         f"“{activity_type}”",
+        f"Venue: {venue_name}",                       # ✅ Venue Name from admin event form
+        f"Activity Points Awarded: {activity_points}", # ✅ Points
     ]
+
     for i, line in enumerate(lines):
-        bold = i in (1, 3)
-        c.setFont("Times-Bold" if bold else "Times-Roman", 16 if bold else 14)
-        c.drawCentredString(w / 2, y - i * 12 * mm, line)
+        bold = i in (1, 3)  # student line + activity line bold
+        c.setFont("Times-Bold" if bold else "Times-Roman", 16 if bold else 13)
+        c.drawCentredString(w / 2, y - i * 10 * mm, line)
 
     # QR (bottom-right above footer)
     qr = qrcode.QRCode(box_size=3, border=1)
@@ -79,6 +79,8 @@ def build_certificate_pdf(
     student_name: str,
     usn: str,
     activity_type: str,
+    venue_name: str,          # ✅ NEW
+    activity_points: int,     # ✅ NEW
     verify_url: str,
 ) -> bytes:
     """
@@ -98,9 +100,12 @@ def build_certificate_pdf(
         student_name=student_name,
         usn=usn,
         activity_type=activity_type,
+        venue_name=venue_name,
+        activity_points=activity_points,
         verify_url=verify_url,
         page_size=(w, h),
     )
+
     overlay_reader = PdfReader(io.BytesIO(overlay_bytes))
     overlay_page = overlay_reader.pages[0]
 

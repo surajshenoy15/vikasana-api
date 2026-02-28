@@ -384,6 +384,14 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     now_ist = _now_ist_naive()
     academic_year = _academic_year_from_date(now_ist)
 
+    # ✅ Venue name from admin event form
+    venue_name = (
+        getattr(event, "venue_name", None)
+        or getattr(event, "venue", None)
+        or getattr(event, "location", None)
+        or ""
+    ).strip() or "N/A"
+
     issued = 0
 
     for sub in submissions:
@@ -423,6 +431,21 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             at = atq.scalar_one_or_none()
             activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
 
+            # ✅ Decide activity points:
+            # If ActivityType has points_per_unit + hours_per_unit, compute; else fallback.
+            points_awarded = 0
+            ppu = getattr(at, "points_per_unit", None)
+            hpu = getattr(at, "hours_per_unit", None)
+
+            if ppu is not None and hpu:
+                try:
+                    points_awarded = int(round((hours / float(hpu)) * float(ppu)))
+                except Exception:
+                    points_awarded = int(ppu) if ppu is not None else 0
+            else:
+                # fallback if you have a fixed points field
+                points_awarded = int(getattr(at, "points", 0) or 0)
+
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
             cert = Certificate(
@@ -439,13 +462,11 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             # ✅ Sign using certificate_no (NOT cert.id)
             sig = sign_cert(cert.certificate_no)
 
-            # ✅ Verify URL uses certificate_no
             verify_url = (
                 f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
             )
 
-            # ✅ build_certificate_pdf expects these exact args
             pdf_bytes = build_certificate_pdf(
                 template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH,
                 certificate_no=cert.certificate_no,
@@ -453,10 +474,11 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 student_name=student_name,
                 usn=usn,
                 activity_type=activity_type_name,
+                venue_name=venue_name,                 # ✅ admin Venue Name
+                activity_points=int(points_awarded),   # ✅ points on certificate
                 verify_url=verify_url,
             )
 
-            # ✅ store using cert id for object key (OK)
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
 
