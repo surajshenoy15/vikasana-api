@@ -185,7 +185,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
-            EventSubmission.status == "approved",
+            func.lower(EventSubmission.status) == "approved",
         )
     )
     submissions = q.scalars().all()
@@ -295,10 +295,9 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
         )
         .order_by(Certificate.issued_at.desc(), Certificate.id.desc())
     )
-
     certs = q.scalars().all()
-    out = []
 
+    out = []
     for cert in certs:
         pdf_url = None
         if cert.pdf_path:
@@ -307,17 +306,15 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
             except:
                 pdf_url = None
 
-        out.append(
-            {
-                "id": cert.id,
-                "certificate_no": cert.certificate_no,
-                "issued_at": cert.issued_at,
-                "event_id": cert.event_id,
-                "submission_id": cert.submission_id,
-                "activity_type_id": getattr(cert, "activity_type_id", None),
-                "pdf_url": pdf_url,
-            }
-        )
+        out.append({
+            "id": cert.id,
+            "certificate_no": cert.certificate_no,
+            "issued_at": cert.issued_at,
+            "event_id": cert.event_id,
+            "submission_id": cert.submission_id,
+            "activity_type_id": getattr(cert, "activity_type_id", None),
+            "pdf_url": pdf_url,
+        })
     return out
 
 
