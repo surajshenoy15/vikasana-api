@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
+from typing import Iterable
 
 from fastapi import HTTPException
-from sqlalchemy import select, func, delete as sql_delete, update, distinct
+from sqlalchemy import select, func, delete as sql_delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
@@ -148,7 +149,7 @@ async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetim
     """
     BG/VF/{MONTH_CODE}{SEQ}/{ACADEMIC_YEAR}
     Example: BG/VF/Jan619/2024-25
-    Uses row lock to avoid duplicate seq in concurrent calls.
+    Uses row lock to avoid duplicate seq in concurrent generations.
     """
     m = _month_code(dt)
 
@@ -175,13 +176,122 @@ async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetim
     return f"BG/VF/{m}{seq}/{academic_year}"
 
 
+async def _get_event_activity_type_ids(db: AsyncSession, event_id: int) -> list[int]:
+    aq = await db.execute(
+        select(EventActivityType.activity_type_id).where(EventActivityType.event_id == event_id)
+    )
+    return [int(r[0]) for r in aq.all() if r and r[0] is not None]
+
+
+async def _eligible_students_from_sessions(
+    db: AsyncSession,
+    event: Event,
+    activity_type_ids: list[int],
+) -> list[int]:
+    """
+    ✅ Students eligible for auto-approval:
+    - Have ActivitySession APPROVED (face verified)
+    - Session.activity_type_id in event's mapped activity_type_ids
+    - Session.started_at within event window
+    """
+    if not activity_type_ids:
+        return []
+
+    start_dt, end_dt = _event_window_ist_naive(event)
+
+    q = await db.execute(
+        select(func.distinct(ActivitySession.student_id)).where(
+            ActivitySession.status == ActivitySessionStatus.APPROVED,
+            ActivitySession.activity_type_id.in_(activity_type_ids),
+            ActivitySession.started_at >= start_dt,
+            ActivitySession.started_at <= end_dt,
+        )
+    )
+    return [int(r[0]) for r in q.all() if r and r[0] is not None]
+
+
+async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> dict:
+    """
+    ✅ MAIN BUTTON LOGIC (Top approve):
+    - Finds students with APPROVED face sessions within event window
+    - Upserts EventSubmission => status=approved, sets submitted_at+approved_at
+    - Generates certificates for them
+
+    Returns:
+      {event_id, eligible_students, submissions_approved, certificates_issued}
+    """
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    activity_type_ids = await _get_event_activity_type_ids(db, event_id)
+    if not activity_type_ids:
+        raise HTTPException(status_code=400, detail="No activity types mapped to this event")
+
+    eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
+    if not eligible_student_ids:
+        return {
+            "event_id": event_id,
+            "eligible_students": 0,
+            "submissions_approved": 0,
+            "certificates_issued": 0,
+        }
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Upsert submissions
+    submissions_approved = 0
+    for sid in eligible_student_ids:
+        res = await db.execute(
+            select(EventSubmission).where(
+                EventSubmission.event_id == event_id,
+                EventSubmission.student_id == sid,
+            )
+        )
+        sub = res.scalar_one_or_none()
+
+        if sub is None:
+            sub = EventSubmission(
+                event_id=event_id,
+                student_id=sid,
+                status="approved",
+            )
+            if hasattr(sub, "submitted_at"):
+                sub.submitted_at = now_utc
+            if hasattr(sub, "approved_at"):
+                sub.approved_at = now_utc
+            db.add(sub)
+            submissions_approved += 1
+        else:
+            if sub.status != "approved":
+                sub.status = "approved"
+                if hasattr(sub, "submitted_at") and sub.submitted_at is None:
+                    sub.submitted_at = now_utc
+                if hasattr(sub, "approved_at"):
+                    sub.approved_at = now_utc
+                submissions_approved += 1
+
+    await db.commit()
+
+    # Generate certificates (only for APPROVED submissions)
+    issued = await _issue_certificates_for_event(db, event)
+
+    return {
+        "event_id": event_id,
+        "eligible_students": len(eligible_student_ids),
+        "submissions_approved": submissions_approved,
+        "certificates_issued": issued,
+    }
+
+
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ Only APPROVED submissions.
+    ✅ Only APPROVED event_submissions (auto-approved or manual).
     ✅ 1 certificate per activity_type configured for event.
     ✅ Uses ActivitySession to compute hours inside event window.
+    ✅ Skips if hours == 0 (no certificate).
     """
-    # 1) approved participants
+    # approved participants
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -192,11 +302,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # 2) activity types attached to this event
-    aq = await db.execute(
-        select(EventActivityType.activity_type_id).where(EventActivityType.event_id == event.id)
-    )
-    activity_type_ids = [r[0] for r in aq.all()]
+    # activity types attached to this event
+    activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
         return 0
 
@@ -216,7 +323,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = getattr(student, "usn", None) or ""
 
         for at_id in activity_type_ids:
-            # Skip if already issued for this submission + activity type
+            # Skip if already issued
             ex = await db.execute(
                 select(Certificate).where(
                     Certificate.submission_id == sub.id,
@@ -226,7 +333,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # hours for that type inside event window (only APPROVED activity sessions)
+            # hours in event window for that type (only APPROVED activity sessions)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -237,6 +344,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 )
             )
             hours = float(hrs_q.scalar() or 0.0)
+
+            # ✅ If no hours, don't issue certificate
+            if hours <= 0:
+                continue
 
             # activity type name
             atq = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
@@ -278,63 +389,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
 
 # =========================================================
-# -------- AUTO APPROVE (FACE VERIFIED) + ISSUE CERTS ------
-# =========================================================
-
-async def auto_approve_and_issue_event_certificates(db: AsyncSession, event_id: int) -> dict:
-    """
-    ✅ One-click admin action:
-    - Find students who have APPROVED ActivitySessions (face verified) for this event's activity types
-      within the event time window
-    - Mark their EventSubmission as APPROVED
-    - Issue certificates (idempotent, will not duplicate)
-    """
-    event = await db.get(Event, event_id)
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    aq = await db.execute(
-        select(EventActivityType.activity_type_id).where(EventActivityType.event_id == event_id)
-    )
-    activity_type_ids = [r[0] for r in aq.all()]
-    if not activity_type_ids:
-        return {"event_id": event_id, "approved_students": 0, "issued": 0, "detail": "No activity types mapped"}
-
-    start_dt, end_dt = _event_window_ist_naive(event)
-
-    # Eligible student ids (face verified sessions during event window)
-    sq = await db.execute(
-        select(distinct(ActivitySession.student_id)).where(
-            ActivitySession.activity_type_id.in_(activity_type_ids),
-            ActivitySession.status == ActivitySessionStatus.APPROVED,
-            ActivitySession.started_at >= start_dt,
-            ActivitySession.started_at <= end_dt,
-        )
-    )
-    eligible_student_ids = [r[0] for r in sq.all()]
-    if not eligible_student_ids:
-        return {"event_id": event_id, "approved_students": 0, "issued": 0, "detail": "No eligible approved sessions"}
-
-    # Approve their submissions (only if submission exists for that event)
-    await db.execute(
-        update(EventSubmission)
-        .where(
-            EventSubmission.event_id == event_id,
-            EventSubmission.student_id.in_(eligible_student_ids),
-            func.lower(EventSubmission.status).in_(["submitted", "in_progress", "draft", "expired"]),
-        )
-        .values(
-            status="approved",
-            approved_at=datetime.now(timezone.utc),
-        )
-    )
-    await db.commit()
-
-    issued = await _issue_certificates_for_event(db, event)
-    return {"event_id": event_id, "approved_students": len(eligible_student_ids), "issued": issued}
-
-
-# =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
 
@@ -350,7 +404,7 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
     )
     certs = q.scalars().all()
 
-    out: list[dict] = []
+    out = []
     for cert in certs:
         pdf_url = None
         if cert.pdf_path:
@@ -359,25 +413,26 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
             except Exception:
                 pdf_url = None
 
-        out.append(
-            {
-                "id": cert.id,
-                "certificate_no": cert.certificate_no,
-                "issued_at": cert.issued_at,
-                "event_id": cert.event_id,
-                "submission_id": cert.submission_id,
-                "activity_type_id": getattr(cert, "activity_type_id", None),
-                "pdf_url": pdf_url,
-            }
-        )
+        out.append({
+            "id": cert.id,
+            "certificate_no": cert.certificate_no,
+            "issued_at": cert.issued_at,
+            "event_id": cert.event_id,
+            "submission_id": cert.submission_id,
+            "activity_type_id": getattr(cert, "activity_type_id", None),
+            "pdf_url": pdf_url,
+        })
     return out
 
 
 async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
+    """
+    Manual regen: generates missing certs for all APPROVED submissions.
+    (If you use auto_approve, call that first, then regen is optional.)
+    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
-
     issued = await _issue_certificates_for_event(db, event)
     return {"event_id": event_id, "issued": issued}
 
@@ -406,9 +461,10 @@ async def create_event(db: AsyncSession, payload):
     ✅ Supports BOTH:
       - payload.activity_type_ids: [1,2,3]
       - payload.activity_list: ["Tree Plantation", "Blood Donation"]
+    ✅ Accepts time fields from payload: start_time/end_time OR event_time/time
     """
-    event_date = getattr(payload, "event_date", None)
-    start_time = getattr(payload, "start_time", None)
+    event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    start_time = getattr(payload, "start_time", None) or getattr(payload, "event_time", None) or getattr(payload, "time", None)
     end_time_raw = getattr(payload, "end_time", None)
 
     end_time_dt = None
@@ -421,7 +477,7 @@ async def create_event(db: AsyncSession, payload):
             end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
 
     venue_name = getattr(payload, "venue_name", None)
-    maps_url = getattr(payload, "maps_url", None)
+    maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
     event = Event(
         title=payload.title,
@@ -439,7 +495,11 @@ async def create_event(db: AsyncSession, payload):
     await db.commit()
     await db.refresh(event)
 
-    # ✅ Save mapping rows (supports ids OR names)
+    # ─────────────────────────────────────────────────────
+    # ✅ Save selected activity types for this event
+    # Supports ids and/or names
+    # ─────────────────────────────────────────────────────
+
     ids: list[int] = []
     raw_ids = getattr(payload, "activity_type_ids", None) or []
     for x in raw_ids:
@@ -448,6 +508,7 @@ async def create_event(db: AsyncSession, payload):
         except Exception:
             pass
 
+    # Fallback: activity_list contains names from frontend
     if not ids:
         names = [str(x).strip() for x in (getattr(payload, "activity_list", None) or []) if str(x).strip()]
         if names:
@@ -464,29 +525,25 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int):
-    """
-    ✅ Fixes your earlier 500:
-    Return EventOut-compatible dict instead of {"message": ...}
-    Also expires only unfinished submissions.
-    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
     event.is_active = False
 
+    # Expire only unfinished
     await db.execute(
         update(EventSubmission)
         .where(
             EventSubmission.event_id == event_id,
-            func.lower(EventSubmission.status).in_(["in_progress", "draft"]),
+            EventSubmission.status.in_(["in_progress", "draft"]),
         )
         .values(status="expired")
     )
 
     await db.commit()
     await db.refresh(event)
-    return _event_out_dict(event)
+    return event
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
@@ -495,17 +552,22 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # delete mapping rows
     await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
 
-    sub_result = await db.execute(select(EventSubmission.id).where(EventSubmission.event_id == event_id))
+    sub_result = await db.execute(
+        select(EventSubmission.id).where(EventSubmission.event_id == event_id)
+    )
     submission_ids = [row[0] for row in sub_result.fetchall()]
 
     if submission_ids:
         await db.execute(
-            sql_delete(EventSubmissionPhoto).where(EventSubmissionPhoto.submission_id.in_(submission_ids))
+            sql_delete(EventSubmissionPhoto).where(
+                EventSubmissionPhoto.submission_id.in_(submission_ids)
+            )
         )
-        await db.execute(sql_delete(EventSubmission).where(EventSubmission.event_id == event_id))
+        await db.execute(
+            sql_delete(EventSubmission).where(EventSubmission.event_id == event_id)
+        )
 
     await db.execute(sql_delete(Event).where(Event.id == event_id))
     await db.commit()
@@ -518,15 +580,15 @@ async def list_event_submissions(db: AsyncSession, event_id: int):
 
 async def approve_submission(db: AsyncSession, submission_id: int):
     """
-    (Optional) Keep for manual approve.
-    NOTE: Your new flow should use auto_approve_and_issue_event_certificates().
+    Manual single approve (still works)
+    NOTE: certificates are better generated via auto_approve_event_from_sessions / regenerate.
     """
     q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
     submission = q.scalar_one_or_none()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if func.lower(submission.status) != "submitted":
+    if submission.status != "submitted":
         raise HTTPException(status_code=400, detail="Only submitted items can be approved")
 
     submission.status = "approved"
@@ -535,11 +597,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     await db.commit()
     await db.refresh(submission)
-
-    event = await db.get(Event, submission.event_id)
-    if event:
-        await _issue_certificates_for_event(db, event)
-
     return submission
 
 
@@ -549,7 +606,7 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    if func.lower(submission.status) != "submitted":
+    if submission.status != "submitted":
         raise HTTPException(status_code=400, detail="Only submitted items can be rejected")
 
     submission.status = "rejected"
@@ -566,15 +623,17 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
-    """
-    Returns today & future events (app shows past via is_active/date logic).
-    """
     today_ist = _now_ist_naive().date()
 
     q = await db.execute(
-        select(Event)
-        .where(Event.event_date != None, Event.event_date >= today_ist)
-        .order_by(Event.event_date.asc(), Event.start_time.asc().nulls_last(), Event.id.desc())
+        select(Event).where(
+            Event.event_date != None,
+            Event.event_date >= today_ist
+        ).order_by(
+            Event.event_date.asc(),
+            Event.start_time.asc().nulls_last(),
+            Event.id.desc()
+        )
     )
     events = q.scalars().all()
     return [_event_out_dict(e) for e in events]
@@ -599,7 +658,11 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     if existing:
         return {"submission_id": existing.id, "status": existing.status}
 
-    submission = EventSubmission(event_id=event_id, student_id=student_id, status="in_progress")
+    submission = EventSubmission(
+        event_id=event_id,
+        student_id=student_id,
+        status="in_progress",
+    )
     db.add(submission)
     await db.commit()
     await db.refresh(submission)
@@ -607,11 +670,17 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
     return {"submission_id": submission.id, "status": submission.status}
 
 
-async def add_photo(db: AsyncSession, submission_id: int, student_id: int, seq_no: int, image_url: str):
+async def add_photo(
+    db: AsyncSession,
+    submission_id: int,
+    student_id: int,
+    seq_no: int,
+    image_url: str,
+):
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
-            EventSubmission.student_id == student_id,
+            EventSubmission.student_id == student_id
         )
     )
     submission = q.scalar_one_or_none()
@@ -635,7 +704,7 @@ async def add_photo(db: AsyncSession, submission_id: int, student_id: int, seq_n
     q = await db.execute(
         select(EventSubmissionPhoto).where(
             EventSubmissionPhoto.submission_id == submission_id,
-            EventSubmissionPhoto.seq_no == seq_no,
+            EventSubmissionPhoto.seq_no == seq_no
         )
     )
     existing_photo = q.scalar_one_or_none()
@@ -646,7 +715,11 @@ async def add_photo(db: AsyncSession, submission_id: int, student_id: int, seq_n
         await db.refresh(existing_photo)
         return existing_photo
 
-    photo = EventSubmissionPhoto(submission_id=submission_id, seq_no=seq_no, image_url=image_url)
+    photo = EventSubmissionPhoto(
+        submission_id=submission_id,
+        seq_no=seq_no,
+        image_url=image_url,
+    )
     db.add(photo)
     await db.commit()
     await db.refresh(photo)
@@ -657,7 +730,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
-            EventSubmission.student_id == student_id,
+            EventSubmission.student_id == student_id
         )
     )
     submission = q.scalar_one_or_none()
@@ -677,7 +750,9 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     required_photos = int(getattr(event, "required_photos", 3) or 3)
 
     q = await db.execute(
-        select(func.count(EventSubmissionPhoto.id)).where(EventSubmissionPhoto.submission_id == submission_id)
+        select(func.count(EventSubmissionPhoto.id)).where(
+            EventSubmissionPhoto.submission_id == submission_id
+        )
     )
     uploaded_photos = int(q.scalar() or 0)
 
@@ -687,7 +762,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             detail=(
                 f"You must upload at least {required_photos} photos before submitting. "
                 f"Currently uploaded: {uploaded_photos}"
-            ),
+            )
         )
 
     submission.status = "submitted"

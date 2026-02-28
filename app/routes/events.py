@@ -47,7 +47,8 @@ from app.controllers.events_controller import (
     end_event,
     list_student_event_certificates,
     regenerate_event_certificates,
-    auto_approve_and_issue_event_certificates,  # ✅ NEW (top approve button)
+    auto_approve_and_issue_event_certificates, 
+    auto_approve_event_from_sessions # ✅ NEW (top approve button)
 )
 
 router = APIRouter(tags=["Events"])
@@ -202,7 +203,13 @@ async def admin_regenerate_event_certificates(
     admin=Depends(get_current_admin),
 ):
     return await regenerate_event_certificates(db, event_id)
-
+@router.post("/admin/events/{event_id}/auto-approve")
+async def admin_auto_approve_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    return await auto_approve_event_from_sessions(db, event_id)
 
 # ══════════════════════════════════════════════
 # STUDENT — Events
