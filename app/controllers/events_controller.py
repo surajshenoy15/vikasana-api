@@ -1,8 +1,7 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
 from sqlalchemy import update
-from app.models.activity_session import ActivitySession
-from app.models.activity_session import ActivitySessionStatus
+
 
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
@@ -252,27 +251,26 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int):
-
-    # 1️⃣ Update event status
+    # 1) get event
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # 2) mark event ended
     event.is_active = False
 
-    # 2️⃣ 🔥 Auto-expire all in-progress sessions
+    # 3) auto-expire all in-progress submissions
     await db.execute(
-        update(ActivitySession)
+        update(EventSubmission)
         .where(
-            ActivitySession.event_id == event_id,
-            ActivitySession.status == ActivitySessionStatus.IN_PROGRESS
+            EventSubmission.event_id == event_id,
+            EventSubmission.status == "in_progress",
         )
-        .values(status=ActivitySessionStatus.EXPIRED)
+        .values(status="expired")  # or "rejected" if you prefer
     )
 
     await db.commit()
-
-    return {"message": "Event ended successfully"}
+    return {"message": "Event ended and in-progress submissions updated"}
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
