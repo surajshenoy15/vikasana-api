@@ -410,7 +410,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # ✅ hours for this activity type within event window
+            # ✅ hours for this activity type within event window (optional info)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -422,26 +422,23 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             )
             hours = float(hrs_q.scalar() or 0.0)
 
-            # If you want certificate even with 0 hours, remove this check.
-            if hours <= 0:
-                continue
-
+            # ✅ DO NOT SKIP when hours = 0
             at = at_by_id.get(at_id)
             activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
 
-            # points calc
+            # ✅ points calc (safe even if hours = 0)
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
                 hpu = getattr(at, "hours_per_unit", None)
 
-                if ppu is not None and hpu:
+                if ppu is not None and hpu and hours > 0:
                     try:
                         points_awarded = int(round((hours / float(hpu)) * float(ppu)))
                     except Exception:
-                        points_awarded = int(ppu) if ppu is not None else 0
+                        points_awarded = 0
                 else:
-                    points_awarded = int(getattr(at, "points", 0) or 0)
+                    points_awarded = 0
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -469,7 +466,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 issue_date=(cert.issued_at.date().isoformat() if cert.issued_at else now_ist.date().isoformat()),
                 student_name=student_name,
                 usn=usn,
-                activity_type=activity_type_name,  # ✅ backend name goes into PDF
+                activity_type=activity_type_name,
                 venue_name=venue_name,
                 activity_points=int(points_awarded),
                 verify_url=verify_url,
