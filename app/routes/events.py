@@ -46,8 +46,7 @@ from app.controllers.events_controller import (
     get_event_thumbnail_upload_url,
     end_event,
     list_student_event_certificates,
-    regenerate_event_certificates,
-    auto_approve_and_issue_event_certificates, 
+    regenerate_event_certificates, 
     auto_approve_event_from_sessions, # ✅ NEW (top approve button)
 )
 
@@ -181,18 +180,14 @@ async def admin_end_event_api(
 
 
 # ✅ One-click: auto approve (face verified) + issue certificates
+
 @router.post("/admin/events/{event_id}/approve-and-issue")
 async def admin_auto_approve_and_issue(
     event_id: int,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    """
-    This is the endpoint your TOP "Approve" button should call.
-    It approves students who have face-verified (APPROVED) activity sessions
-    within this event window and generates certificates.
-    """
-    return await auto_approve_and_issue_event_certificates(db, event_id)
+    return await auto_approve_event_from_sessions(db, event_id)
 
 
 # ✅ Admin can still regenerate certificates if needed (idempotent)
