@@ -1,3 +1,5 @@
+# app/core/database.py
+
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -7,6 +9,8 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
 
+# ───────────────── ENGINE ─────────────────
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=settings.DEBUG,
@@ -15,18 +19,25 @@ engine = create_async_engine(
     pool_pre_ping=True,
 )
 
+
+# ───────────────── SESSION ─────────────────
+
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
     expire_on_commit=False,
-    autocommit=False,
     autoflush=False,
+    autocommit=False,
 )
 
+
+# ───────────────── BASE ─────────────────
 
 class Base(DeclarativeBase):
     pass
 
+
+# ───────────────── DEPENDENCY ─────────────────
 
 async def get_db():
     async with AsyncSessionLocal() as session:
@@ -36,12 +47,3 @@ async def get_db():
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
-
-
-# ✅ IMPORTANT: Register models (avoid mapper errors)
-# Keep at bottom to avoid circular imports
-import app.models.student
-import app.models.events
-import app.models.certificate
