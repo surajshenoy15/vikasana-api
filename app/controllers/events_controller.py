@@ -286,25 +286,20 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 # =========================================================
 
 async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
-    """
-    ✅ Used by: GET /student/events/{event_id}/certificates
-    ✅ Only return certs for APPROVED submissions (extra safety)
-    """
     q = await db.execute(
-        select(Certificate, EventSubmission)
-        .join(EventSubmission, EventSubmission.id == Certificate.submission_id)
+        select(Certificate)
         .where(
             Certificate.student_id == student_id,
             Certificate.event_id == event_id,
             Certificate.revoked_at.is_(None),
-            EventSubmission.status == "approved",
         )
         .order_by(Certificate.issued_at.desc(), Certificate.id.desc())
     )
 
-    rows = q.all()
-    out: list[dict] = []
-    for cert, sub in rows:
+    certs = q.scalars().all()
+    out = []
+
+    for cert in certs:
         pdf_url = None
         if cert.pdf_path:
             try:
