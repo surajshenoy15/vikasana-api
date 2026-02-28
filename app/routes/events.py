@@ -32,7 +32,7 @@ from app.schemas.events import (
 )
 
 # ✅ certificates schema
-from app.schemas.certificates import StudentCertificateOut
+from app.schemas.certificate import StudentCertificateOut
 
 from app.controllers.events_controller import (
     create_event,
