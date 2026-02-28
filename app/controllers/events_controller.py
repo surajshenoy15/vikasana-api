@@ -1,20 +1,33 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
 
+import os
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
 
+from fastapi import HTTPException
 from sqlalchemy import select, func, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import HTTPException
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
+from app.models.student import Student  # ✅ make sure this exists
+
+# ✅ NEW (Certificates)
+from app.models.certificate import Certificate, CertificateCounter
+from app.core.cert_sign import sign_cert
+from app.core.cert_pdf import build_certificate_pdf
+from app.core.config import settings
+
 from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 IST = ZoneInfo("Asia/Kolkata")
 
+
+# =========================================================
+# ---------------------- TIME HELPERS ----------------------
+# =========================================================
 
 def _now_ist_naive() -> datetime:
     return datetime.now(IST).replace(tzinfo=None)
@@ -51,6 +64,140 @@ def _ensure_event_window(event: Event) -> None:
                 raise HTTPException(status_code=403, detail="Event has ended.")
 
 
+# =========================================================
+# ---------------------- CERT HELPERS ----------------------
+# =========================================================
+
+def _month_code(dt: datetime) -> str:
+    return dt.strftime("%b")  # Jan, Feb...
+
+
+def _academic_year_from_date(dt: datetime) -> str:
+    """
+    Academic year in India typically: Jun -> May
+    Example:
+      Feb 2025 => 2024-25
+      Jul 2025 => 2025-26
+    """
+    y = dt.year
+    m = dt.month
+    start_year = y if m >= 6 else (y - 1)
+    end_year_short = str(start_year + 1)[-2:]
+    return f"{start_year}-{end_year_short}"
+
+
+async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetime) -> str:
+    """
+    BG/VF/{MONTH_CODE}{SEQ}/{ACADEMIC_YEAR}
+    Example: BG/VF/Jan619/2024-25
+    Uses row lock to avoid duplicate seq in concurrent end_event calls.
+    """
+    m = _month_code(dt)
+
+    stmt = (
+        select(CertificateCounter)
+        .where(
+            CertificateCounter.month_code == m,
+            CertificateCounter.academic_year == academic_year,
+        )
+        .with_for_update()
+    )
+    res = await db.execute(stmt)
+    counter = res.scalar_one_or_none()
+
+    if counter is None:
+        counter = CertificateCounter(month_code=m, academic_year=academic_year, next_seq=1)
+        db.add(counter)
+        await db.flush()
+
+    seq = int(counter.next_seq or 1)
+    counter.next_seq = seq + 1
+    counter.updated_at = datetime.utcnow()
+
+    return f"BG/VF/{m}{seq}/{academic_year}"
+
+
+async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
+    """
+    Generates certificates for all APPROVED submissions of an event.
+    Saves PDF into storage/certificates/ and stores path in DB.
+    """
+    # Get all approved submissions for this event
+    q = await db.execute(
+        select(EventSubmission).where(
+            EventSubmission.event_id == event.id,
+            EventSubmission.status == "approved",
+        )
+    )
+    submissions = q.scalars().all()
+    if not submissions:
+        return 0
+
+    now_utc = datetime.now(timezone.utc)
+    academic_year = _academic_year_from_date(_now_ist_naive())
+
+    os.makedirs("storage/certificates", exist_ok=True)
+
+    issued = 0
+    for sub in submissions:
+        # Skip if already issued for this submission
+        exists = await db.execute(select(Certificate).where(Certificate.submission_id == sub.id))
+        if exists.scalar_one_or_none():
+            continue
+
+        cert_no = await _next_certificate_no(db, academic_year, _now_ist_naive())
+
+        # Fetch student
+        sq = await db.execute(select(Student).where(Student.id == sub.student_id))
+        student = sq.scalar_one_or_none()
+
+        student_name = getattr(student, "name", None) or getattr(student, "student_name", None) or "Student"
+        usn = getattr(student, "usn", None) or ""
+
+        activity_type = getattr(event, "title", None) or "Social Activity"
+
+        # Optional: if you store points/hours on submission, use them; else keep 0 for now
+        hours = float(getattr(sub, "total_hours", 0) or 0)
+        points = int(getattr(sub, "points_awarded", 0) or 0)
+
+        cert = Certificate(
+            certificate_no=cert_no,
+            submission_id=sub.id,     # ✅ IMPORTANT: your Certificate model must have this FK
+            student_id=sub.student_id,
+            event_id=event.id,
+            issued_at=now_utc,
+        )
+        db.add(cert)
+        await db.flush()  # cert.id available
+
+        sig = sign_cert(cert.id)
+        verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
+
+        pdf_bytes = build_certificate_pdf(
+            certificate_no=cert_no,
+            issue_date=_now_ist_naive().strftime("%d.%m.%Y"),
+            student_name=student_name,
+            usn=usn,
+            activity_type=activity_type,
+            hours=hours,
+            points=points,
+            verify_url=verify_url,
+        )
+
+        path = f"storage/certificates/cert_{cert.id}.pdf"
+        with open(path, "wb") as f:
+            f.write(pdf_bytes)
+
+        cert.pdf_path = path
+        issued += 1
+
+    return issued
+
+
+# =========================================================
+# ---------------------- THUMBNAIL -------------------------
+# =========================================================
+
 async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_type: str):
     return await generate_event_thumbnail_presigned_put(
         filename=filename,
@@ -84,7 +231,6 @@ async def create_event(db: AsyncSession, payload):
                 raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
             end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
 
-    # ✅ NEW: read venue_name/maps_url
     venue_name = getattr(payload, "venue_name", None)
     maps_url = getattr(payload, "maps_url", None)
 
@@ -97,8 +243,6 @@ async def create_event(db: AsyncSession, payload):
         start_time=start_time,
         end_time=end_time_dt,
         thumbnail_url=getattr(payload, "thumbnail_url", None),
-
-        # ✅ NEW: save to DB
         venue_name=venue_name,
         maps_url=maps_url,
     )
@@ -109,6 +253,11 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int) -> Event:
+    """
+    ✅ UPDATED:
+    - Ends event
+    - Generates certificates for all approved submissions
+    """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
 
@@ -121,6 +270,17 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
     event.is_active = False
     if hasattr(event, "end_time"):
         event.end_time = _now_ist_naive()
+
+    # ✅ Issue certificates (in same transaction)
+    # If anything fails, you will see error & can retry end_event safely (it skips already issued)
+    try:
+        issued_count = await _issue_certificates_for_event(db, event)
+        # You can store issued_count somewhere if you want (optional)
+        # print("Issued certs:", issued_count)
+    except Exception as e:
+        # If you prefer: allow event to end even if cert fails -> commit first then issue.
+        # For now, we stop and show error so you can fix quickly.
+        raise HTTPException(status_code=500, detail=f"Certificate generation failed: {str(e)}")
 
     await db.commit()
     await db.refresh(event)
