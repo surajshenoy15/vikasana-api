@@ -767,20 +767,49 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
-    today_ist = _now_ist_naive().date()
+    now_dt = _now_ist_naive()
+    today = now_dt.date()
+    now_t = now_dt.time()
 
     q = await db.execute(
-        select(Event).where(
-            Event.event_date != None,
-            Event.event_date >= today_ist
-        ).order_by(
-            Event.event_date.asc(),
-            Event.start_time.asc().nulls_last(),
-            Event.id.desc()
-        )
+        select(Event)
+        .where(Event.event_date.is_not(None))
+        .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
     )
     events = q.scalars().all()
-    return [_event_out_dict(e) for e in events]
+
+    upcoming, ongoing, past = [], [], []
+
+    for e in events:
+        d = e.event_date
+        start_t = getattr(e, "start_time", None) or time_type(0, 0)
+
+        end_val = getattr(e, "end_time", None)
+        end_t = end_val.time() if isinstance(end_val, datetime) else end_val  # can be time or None
+
+        item = _event_out_dict(e)
+
+        if d > today:
+            upcoming.append(item)
+            continue
+
+        if d < today:
+            past.append(item)
+            continue
+
+        # today
+        if end_t and now_t > end_t:
+            past.append(item)
+        elif now_t < start_t:
+            upcoming.append(item)
+        else:
+            ongoing.append(item)
+
+    return {
+        "upcoming": upcoming,
+        "ongoing": ongoing,
+        "past": past,
+    }
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
