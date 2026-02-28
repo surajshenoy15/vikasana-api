@@ -1,5 +1,21 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
+from datetime import datetime, timezone
+from urllib.parse import quote
+
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.cert_sign import sign_cert
+from app.core.cert_pdf import build_certificate_pdf
+from app.core.cert_storage import upload_certificate_pdf_bytes
+
+from app.models.events import Event, EventSubmission
+from app.models.student import Student
+from app.models.certificate import Certificate
+
+
 
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
@@ -324,6 +340,9 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         "certificates_issued": issued,
     }
 
+
+
+
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
     ✅ Only APPROVED event_submissions
@@ -370,7 +389,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     for sub in submissions:
         sq = await db.execute(select(Student).where(Student.id == sub.student_id))
         student = sq.scalar_one_or_none()
-        student_name = getattr(student, "name", None) or getattr(student, "student_name", None) or "Student"
+        if not student:
+            continue
+
+        student_name = getattr(student, "name", None) or "Student"
         usn = getattr(student, "usn", None) or ""
 
         for at_id in activity_type_ids:
@@ -414,22 +436,30 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             db.add(cert)
             await db.flush()
 
-            sig = sign_cert(cert.id)
-            verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
+            # ✅ Sign using certificate_no (NOT cert.id)
+            sig = sign_cert(cert.certificate_no)
 
-            pdf_bytes = build_certificate_pdf(
-                cert_id=cert.certificate_no,                     # ✅ Certificate model field
-                student_name=student.name,                       # ✅ Student model field
-                usn=student.usn,                                 # ✅ Student model field
-                college=student.college,                         # ✅ FIXED
-                event_title=event.title,
-                issued_on=(cert.issued_at.date() if cert.issued_at else _now_ist_naive().date()),
-                sig=sign_cert(cert.certificate_no),              # ✅ since DB has no signature column
-                template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH # ✅ required kw-only arg
+            # ✅ Verify URL uses certificate_no
+            verify_url = (
+                f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
+                f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
             )
 
+            # ✅ build_certificate_pdf expects these exact args
+            pdf_bytes = build_certificate_pdf(
+                template_pdf_path=settings.CERT_TEMPLATE_PDF_PATH,
+                certificate_no=cert.certificate_no,
+                issue_date=(cert.issued_at.date().isoformat() if cert.issued_at else now_ist.date().isoformat()),
+                student_name=student_name,
+                usn=usn,
+                activity_type=activity_type_name,
+                verify_url=verify_url,
+            )
+
+            # ✅ store using cert id for object key (OK)
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
+
             issued += 1
 
     await db.commit()
