@@ -1,2 +1,2 @@
 # intentionally empty to avoid circular imports
-from .certificate import Certificate, CertificateCounter
+from .certificates import Certificate, CertificateCounter
