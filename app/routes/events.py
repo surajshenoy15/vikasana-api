@@ -17,6 +17,7 @@ from app.models.events import Event
 
 # ✅ event ↔ activity_type mapping
 from app.models.event_activity_type import EventActivityType
+from app.controllers.events_controller import regenerate_event_certificates
 
 from app.schemas.events import (
     EventCreateIn,
@@ -167,6 +168,14 @@ async def admin_end_event_api(
 ):
     return await end_event(db, event_id)
 
+
+@router.post("/admin/events/{event_id}/certificates/regenerate")
+async def admin_regenerate_event_certificates(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin),
+):
+    return await regenerate_event_certificates(db, event_id)
 
 # ══════════════════════════════════════════════
 # STUDENT — Events

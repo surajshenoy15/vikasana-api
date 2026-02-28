@@ -317,6 +317,14 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
         })
     return out
 
+async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # even if event is active/inactive, allow regen
+    issued = await _issue_certificates_for_event(db, event)
+    return {"event_id": event_id, "issued": issued}
 
 # =========================================================
 # ---------------------- THUMBNAIL -------------------------
