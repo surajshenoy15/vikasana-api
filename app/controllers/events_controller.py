@@ -394,13 +394,14 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
 
             pdf_bytes = build_certificate_pdf(
-                certificate_no=cert_no,
-                issue_date=now_ist.strftime("%d.%m.%Y"),
-                student_name=student_name,
-                usn=usn,
-                activity_type=activity_type_name,
-                verify_url=verify_url,
-            )
+    template_pdf_path="app/assets/certificate_template.pdf",
+    certificate_no=cert_no,
+    issue_date=now_ist.strftime("%d.%m.%Y"),
+    student_name=student_name,
+    usn=usn,
+    activity_type=activity_type_name,
+    verify_url=verify_url,
+)
 
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
