@@ -19,7 +19,7 @@ class Certificate(Base):
     __tablename__ = "certificates"
     __table_args__ = (
         UniqueConstraint("certificate_no", name="uq_certificate_no"),
-        UniqueConstraint("submission_id", "activity_type_id", name="uq_cert_submission_activity"),  # ✅ NEW
+        UniqueConstraint("submission_id", "activity_type_id", name="uq_cert_submission_activity"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -30,7 +30,8 @@ class Certificate(Base):
     student_id: Mapped[int] = mapped_column(ForeignKey("students.id"), nullable=False)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), nullable=False)
 
-    activity_type_id: Mapped[int] = mapped_column(ForeignKey("activity_types.id"), nullable=False)  # ✅ NEW
+    # ✅ REQUIRED
+    activity_type_id: Mapped[int] = mapped_column(ForeignKey("activity_types.id"), nullable=False)
 
     pdf_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
