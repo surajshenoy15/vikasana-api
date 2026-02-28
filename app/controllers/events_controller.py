@@ -1,5 +1,8 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
+from sqlalchemy import update
+from app.models.activity_session import ActivitySession
+from app.models.activity_session import ActivitySessionStatus
 
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
@@ -248,34 +251,28 @@ async def create_event(db: AsyncSession, payload):
     return event
 
 
-async def end_event(db: AsyncSession, event_id: int) -> Event:
-    """
-    ✅ UPDATED:
-    - Ends event
-    - Generates certificates for all approved submissions
-    - Uploads PDFs to MinIO
-    """
-    q = await db.execute(select(Event).where(Event.id == event_id))
-    event = q.scalar_one_or_none()
+async def end_event(db: AsyncSession, event_id: int):
 
+    # 1️⃣ Update event status
+    event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if getattr(event, "is_active", True) is False:
-        return event
-
     event.is_active = False
-    if hasattr(event, "end_time"):
-        event.end_time = _now_ist_naive()
 
-    try:
-        await _issue_certificates_for_event(db, event)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Certificate generation failed: {str(e)}")
+    # 2️⃣ 🔥 Auto-expire all in-progress sessions
+    await db.execute(
+        update(ActivitySession)
+        .where(
+            ActivitySession.event_id == event_id,
+            ActivitySession.status == ActivitySessionStatus.IN_PROGRESS
+        )
+        .values(status=ActivitySessionStatus.EXPIRED)
+    )
 
     await db.commit()
-    await db.refresh(event)
-    return event
+
+    return {"message": "Event ended successfully"}
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
