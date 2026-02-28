@@ -345,7 +345,11 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 async def create_event(db: AsyncSession, payload):
     """
     Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
-    Also stores selected activity_type_ids into event_activity_types table.
+    Also stores selected activity types into event_activity_types table.
+
+    ✅ Supports BOTH:
+      - payload.activity_type_ids: [1,2,3]
+      - payload.activity_list: ["Tree Plantation", "Blood Donation"]
     """
     event_date = getattr(payload, "event_date", None)
     start_time = getattr(payload, "start_time", None)
@@ -379,9 +383,29 @@ async def create_event(db: AsyncSession, payload):
     await db.commit()
     await db.refresh(event)
 
-    # ✅ save selected activity types for this event
-    for at_id in getattr(payload, "activity_type_ids", []) or []:
-        db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
+    # ─────────────────────────────────────────────────────
+    # ✅ Save selected activity types for this event
+    # Supports ids and/or names
+    # ─────────────────────────────────────────────────────
+
+    ids: list[int] = []
+    raw_ids = getattr(payload, "activity_type_ids", None) or []
+    for x in raw_ids:
+        try:
+            ids.append(int(x))
+        except Exception:
+            pass
+
+    # Fallback: activity_list contains names from frontend
+    if not ids:
+        names = [str(x).strip() for x in (getattr(payload, "activity_list", None) or []) if str(x).strip()]
+        if names:
+            rq = await db.execute(select(ActivityType.id).where(ActivityType.name.in_(names)))
+            ids = [int(r[0]) for r in rq.all()]
+
+    # Insert mapping (avoid duplicates in ids list)
+    for at_id in sorted(set(ids)):
+        db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
 
     await db.commit()
     await db.refresh(event)
@@ -458,12 +482,19 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if submission.status != "submitted":
         raise HTTPException(status_code=400, detail="Only submitted items can be approved")
 
+    # mark approved
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
     await db.refresh(submission)
+
+    # ✅ issue certificates for this event (for all approved subs, includes this one)
+    event = await db.get(Event, submission.event_id)
+    if event:
+        await _issue_certificates_for_event(db, event)  # this function commits internally
+
     return submission
 
 
