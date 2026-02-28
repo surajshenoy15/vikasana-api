@@ -10,7 +10,7 @@ from app.core.cert_storage import presign_certificate_download_url
 
 from app.models.student import Student
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
-from app.models.certificates import Certificate  # adjust if your model name differs
+from app.models.certificate import Certificate
 
 
 router = APIRouter(prefix="/student/certificates", tags=["Student - Certificates"])
