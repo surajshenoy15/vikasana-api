@@ -244,9 +244,30 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # ✅ Try mapped activity types first
     activity_type_ids = await _get_event_activity_type_ids(db, event_id)
+
+    # ✅ FALLBACK: infer activity types from APPROVED sessions inside event window
     if not activity_type_ids:
-        raise HTTPException(status_code=400, detail="No activity types mapped to this event")
+        start_utc, end_utc = _event_window_utc(event)
+        aq = await db.execute(
+            select(func.distinct(ActivitySession.activity_type_id)).where(
+                ActivitySession.status == ActivitySessionStatus.APPROVED,
+                ActivitySession.started_at >= start_utc,
+                ActivitySession.started_at <= end_utc,
+                ActivitySession.activity_type_id.is_not(None),
+            )
+        )
+        activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
+
+    # ✅ Still nothing => nothing to approve / generate
+    if not activity_type_ids:
+        return {
+            "event_id": event_id,
+            "eligible_students": 0,
+            "submissions_approved": 0,
+            "certificates_issued": 0,
+        }
 
     eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
     if not eligible_student_ids:
@@ -302,7 +323,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         "submissions_approved": submissions_approved,
         "certificates_issued": issued,
     }
-
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
