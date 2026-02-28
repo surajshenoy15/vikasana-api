@@ -1,7 +1,6 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
 
-import os
 from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
 
@@ -10,18 +9,20 @@ from sqlalchemy import select, func, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
-from app.models.student import Student  # ✅ make sure this exists
+from app.models.student import Student
 
-# ✅ NEW (Certificates)
+# ✅ Certificates
 from app.models.certificate import Certificate, CertificateCounter
 from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
 from app.core.config import settings
 
+# ✅ MinIO upload + presign
+from app.core.cert_storage import upload_certificate_pdf_bytes
+
 from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -112,7 +113,7 @@ async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetim
 
     seq = int(counter.next_seq or 1)
     counter.next_seq = seq + 1
-    counter.updated_at = datetime.utcnow()
+    counter.updated_at = datetime.now(timezone.utc)
 
     return f"BG/VF/{m}{seq}/{academic_year}"
 
@@ -120,9 +121,8 @@ async def _next_certificate_no(db: AsyncSession, academic_year: str, dt: datetim
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
     Generates certificates for all APPROVED submissions of an event.
-    Saves PDF into storage/certificates/ and stores path in DB.
+    Uploads PDF to MinIO and stores object_key in cert.pdf_path.
     """
-    # Get all approved submissions for this event
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -134,9 +134,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         return 0
 
     now_utc = datetime.now(timezone.utc)
-    academic_year = _academic_year_from_date(_now_ist_naive())
-
-    os.makedirs("storage/certificates", exist_ok=True)
+    now_ist = _now_ist_naive()
+    academic_year = _academic_year_from_date(now_ist)
 
     issued = 0
     for sub in submissions:
@@ -145,7 +144,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         if exists.scalar_one_or_none():
             continue
 
-        cert_no = await _next_certificate_no(db, academic_year, _now_ist_naive())
+        cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
         # Fetch student
         sq = await db.execute(select(Student).where(Student.id == sub.student_id))
@@ -162,7 +161,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
         cert = Certificate(
             certificate_no=cert_no,
-            submission_id=sub.id,     # ✅ IMPORTANT: your Certificate model must have this FK
+            submission_id=sub.id,
             student_id=sub.student_id,
             event_id=event.id,
             issued_at=now_utc,
@@ -175,20 +174,17 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
         pdf_bytes = build_certificate_pdf(
             certificate_no=cert_no,
-            issue_date=_now_ist_naive().strftime("%d.%m.%Y"),
+            issue_date=now_ist.strftime("%d.%m.%Y"),
             student_name=student_name,
             usn=usn,
             activity_type=activity_type,
-            hours=hours,
-            points=points,
             verify_url=verify_url,
         )
 
-        path = f"storage/certificates/cert_{cert.id}.pdf"
-        with open(path, "wb") as f:
-            f.write(pdf_bytes)
+        # ✅ Upload to MinIO and store object key in pdf_path
+        object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
+        cert.pdf_path = object_key
 
-        cert.pdf_path = path
         issued += 1
 
     return issued
@@ -257,6 +253,7 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
     ✅ UPDATED:
     - Ends event
     - Generates certificates for all approved submissions
+    - Uploads PDFs to MinIO
     """
     q = await db.execute(select(Event).where(Event.id == event_id))
     event = q.scalar_one_or_none()
@@ -271,15 +268,9 @@ async def end_event(db: AsyncSession, event_id: int) -> Event:
     if hasattr(event, "end_time"):
         event.end_time = _now_ist_naive()
 
-    # ✅ Issue certificates (in same transaction)
-    # If anything fails, you will see error & can retry end_event safely (it skips already issued)
     try:
-        issued_count = await _issue_certificates_for_event(db, event)
-        # You can store issued_count somewhere if you want (optional)
-        # print("Issued certs:", issued_count)
+        await _issue_certificates_for_event(db, event)
     except Exception as e:
-        # If you prefer: allow event to end even if cert fails -> commit first then issue.
-        # For now, we stop and show error so you can fix quickly.
         raise HTTPException(status_code=500, detail=f"Certificate generation failed: {str(e)}")
 
     await db.commit()

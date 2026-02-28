@@ -9,8 +9,8 @@ class CertificateCounter(Base):
     __table_args__ = (UniqueConstraint("month_code", "academic_year", name="uq_cert_counter_month_year"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    month_code: Mapped[str] = mapped_column(String(8), nullable=False)       # Jan
-    academic_year: Mapped[str] = mapped_column(String(16), nullable=False)   # 2024-25
+    month_code: Mapped[str] = mapped_column(String(8), nullable=False)
+    academic_year: Mapped[str] = mapped_column(String(16), nullable=False)
     next_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
@@ -34,7 +34,7 @@ class Certificate(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # ✅ These are required for selectinload(Certificate.student/event)
+    # ✅ required for your verify route
     student = relationship("Student")
     event = relationship("Event")
     submission = relationship("EventSubmission")

@@ -1,3 +1,5 @@
+# app/main.py
+
 from dotenv import load_dotenv
 import os
 
@@ -41,6 +43,10 @@ from app.routes.admin_sessions import router as admin_sessions_router
 
 # ✅ activity types router (NEW)
 from app.routes.activity_types import router as activity_types_router
+
+# ✅ certificates routers (NEW)
+from app.routes.public_certificates import router as public_certificates_router
+from app.routes.student_certificates import router as student_certificates_router
 
 
 app = FastAPI(
@@ -113,6 +119,12 @@ app.include_router(activity_types_router, prefix="/api")
 # ✅ Events (admin + student)
 # includes: /api/admin/events/{id}/end  and /api/student/events etc
 app.include_router(events_router, prefix="/api")
+
+# ✅ Certificates (NEW)
+# Public verify:   GET /api/public/certificates/verify?cert_id=&sig=
+# Student link:    GET /api/student/certificates/{session_id}/download-url
+app.include_router(public_certificates_router, prefix="/api")
+app.include_router(student_certificates_router, prefix="/api")
 
 # Other
 app.include_router(activity_summary_router, prefix="/api")

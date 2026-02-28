@@ -7,17 +7,14 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
 
-# ── Async Engine ──────────────────────────────────────────────────────
-# Connects to your PostgreSQL on VPS using asyncpg driver
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,   # Set DEBUG=false in .env to stop SQL logs
+    echo=settings.DEBUG,
     pool_size=10,
     max_overflow=20,
-    pool_pre_ping=True,    # Drops stale connections before use
+    pool_pre_ping=True,
 )
 
-# ── Session Factory ───────────────────────────────────────────────────
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
@@ -27,13 +24,10 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
-# ── Base class for all models ─────────────────────────────────────────
 class Base(DeclarativeBase):
     pass
 
 
-# ── FastAPI Dependency ────────────────────────────────────────────────
-# Inject this into any route with: db: AsyncSession = Depends(get_db)
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -44,3 +38,10 @@ async def get_db():
             raise
         finally:
             await session.close()
+
+
+# ✅ IMPORTANT: Register models (avoid mapper errors)
+# Keep at bottom to avoid circular imports
+import app.models.student
+import app.models.events
+import app.models.certificate
