@@ -17,7 +17,6 @@ from app.models.events import Event
 
 # ✅ event ↔ activity_type mapping
 from app.models.event_activity_type import EventActivityType
-from app.controllers.events_controller import regenerate_event_certificates
 
 from app.schemas.events import (
     EventCreateIn,
@@ -32,7 +31,7 @@ from app.schemas.events import (
     ThumbnailUploadUrlOut,
 )
 
-# ✅ certificates schema
+# ✅ certificates schema (your file is certificate.py)
 from app.schemas.certificate import StudentCertificateOut
 
 from app.controllers.events_controller import (
@@ -46,7 +45,8 @@ from app.controllers.events_controller import (
     reject_submission,
     get_event_thumbnail_upload_url,
     end_event,
-    list_student_event_certificates,   # ✅ NEW
+    list_student_event_certificates,
+    regenerate_event_certificates,  # ✅ NEW
 )
 
 router = APIRouter(tags=["Events"])
@@ -166,9 +166,11 @@ async def admin_end_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    # ✅ Only ends event. No expiry. No auto certificate generation.
     return await end_event(db, event_id)
 
 
+# ✅ Admin manually generates certificates after approvals
 @router.post("/admin/events/{event_id}/certificates/regenerate")
 async def admin_regenerate_event_certificates(
     event_id: int,
@@ -176,6 +178,7 @@ async def admin_regenerate_event_certificates(
     admin=Depends(get_current_admin),
 ):
     return await regenerate_event_certificates(db, event_id)
+
 
 # ══════════════════════════════════════════════
 # STUDENT — Events
@@ -209,7 +212,7 @@ async def student_event_certificates(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # ✅ IMPORTANT: returns [] if none, not 404
+    # ✅ returns [] if none
     return await list_student_event_certificates(db=db, student_id=student.id, event_id=event_id)
 
 
