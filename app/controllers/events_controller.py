@@ -326,15 +326,10 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ Only APPROVED event_submissions (auto-approved or manual).
-    ✅ 1 certificate per activity_type configured for event.
-    ✅ Uses ActivitySession to compute hours inside event window.
-    ✅ Skips if hours == 0 (no certificate).
-
-    ✅ IMPORTANT FIX:
-    Use event window in UTC-aware when filtering ActivitySession.started_at.
+    ✅ Only APPROVED event_submissions
+    ✅ 1 certificate per activity_type for event
+    ✅ If event has no mapping, infer activity types from approved sessions inside event window
     """
-    # approved participants
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
@@ -345,8 +340,22 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # activity types attached to this event
+    # ✅ mapped activity types
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
+
+    # ✅ fallback if mapping missing: infer from sessions in event window
+    if not activity_type_ids:
+        start_utc, end_utc = _event_window_utc(event)
+        aq = await db.execute(
+            select(func.distinct(ActivitySession.activity_type_id)).where(
+                ActivitySession.status == ActivitySessionStatus.APPROVED,
+                ActivitySession.started_at >= start_utc,
+                ActivitySession.started_at <= end_utc,
+                ActivitySession.activity_type_id.is_not(None),
+            )
+        )
+        activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
+
     if not activity_type_ids:
         return 0
 
@@ -359,14 +368,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     issued = 0
 
     for sub in submissions:
-        # Fetch student
         sq = await db.execute(select(Student).where(Student.id == sub.student_id))
         student = sq.scalar_one_or_none()
         student_name = getattr(student, "name", None) or getattr(student, "student_name", None) or "Student"
         usn = getattr(student, "usn", None) or ""
 
         for at_id in activity_type_ids:
-            # Skip if already issued
+            # skip if already issued
             ex = await db.execute(
                 select(Certificate).where(
                     Certificate.submission_id == sub.id,
@@ -376,7 +384,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # hours in event window for that type (only APPROVED activity sessions)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -387,12 +394,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 )
             )
             hours = float(hrs_q.scalar() or 0.0)
-
-            # ✅ If no hours, don't issue certificate
             if hours <= 0:
                 continue
 
-            # activity type name
             atq = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
             at = atq.scalar_one_or_none()
             activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
@@ -408,24 +412,22 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 issued_at=now_utc,
             )
             db.add(cert)
-            await db.flush()  # cert.id available
+            await db.flush()
 
             sig = sign_cert(cert.id)
             verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
 
             pdf_bytes = build_certificate_pdf(
-    template_pdf_path="app/assets/certificate_template.pdf",
-    certificate_no=cert_no,
-    issue_date=now_ist.strftime("%d.%m.%Y"),
-    student_name=student_name,
-    usn=usn,
-    activity_type=activity_type_name,
-    verify_url=verify_url,
-)
+                certificate_no=cert_no,
+                issue_date=now_ist.strftime("%d.%m.%Y"),
+                student_name=student_name,
+                usn=usn,
+                activity_type=activity_type_name,
+                verify_url=verify_url,
+            )
 
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
-
             issued += 1
 
     await db.commit()
