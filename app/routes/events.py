@@ -1,5 +1,4 @@
 # app/routes/events.py
-
 from typing import List
 from datetime import datetime, date as date_type, time as time_type
 from zoneinfo import ZoneInfo
@@ -16,7 +15,7 @@ from app.models.activity_session import ActivitySession
 from app.models.activity_photo import ActivityPhoto
 from app.models.events import Event
 
-# ✅ NEW: event ↔ activity_type mapping
+# ✅ event ↔ activity_type mapping
 from app.models.event_activity_type import EventActivityType
 
 from app.schemas.events import (
@@ -32,6 +31,9 @@ from app.schemas.events import (
     ThumbnailUploadUrlOut,
 )
 
+# ✅ certificates schema
+from app.schemas.certificates import StudentCertificateOut
+
 from app.controllers.events_controller import (
     create_event,
     delete_event,
@@ -43,30 +45,18 @@ from app.controllers.events_controller import (
     reject_submission,
     get_event_thumbnail_upload_url,
     end_event,
+    list_student_event_certificates,   # ✅ NEW
 )
 
 router = APIRouter(tags=["Events"])
-
-# =========================================================
-# Helpers (match controller logic)
-# end_time in DB is TIMESTAMP WITHOUT TZ (naive datetime)
-# =========================================================
-
 IST = ZoneInfo("Asia/Kolkata")
 
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
-    # represents IST clock time but stored naive
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
 def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
-    """
-    Accepts end_val as:
-      - datetime -> strip tzinfo
-      - time     -> combine with event_date into datetime
-      - None     -> None
-    """
     if end_val is None:
         return None
 
@@ -82,11 +72,6 @@ def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
 
 
 def _event_out_dict(ev: Event) -> dict:
-    """
-    ✅ EventOut expects end_time as Optional[time]
-    But DB stores end_time as Optional[datetime]
-    Convert datetime -> time for API response.
-    """
     end_val = getattr(ev, "end_time", None)
     end_time = end_val.time() if isinstance(end_val, datetime) else end_val
 
@@ -115,7 +100,6 @@ async def admin_create_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # ✅ create_event controller stores venue_name + maps_url + activity_type_ids mapping
     return await create_event(db, payload)
 
 
@@ -148,19 +132,15 @@ async def admin_update_event_api(
     ev.description = (payload.description or "").strip() or None
     ev.required_photos = int(payload.required_photos or 3)
 
-    # ✅ schedule columns
     ev.event_date = payload.event_date
     ev.start_time = payload.start_time
     ev.end_time = _as_naive_datetime_for_end_time(payload.event_date, payload.end_time)
 
-    # ✅ thumbnail
     ev.thumbnail_url = payload.thumbnail_url
-
-    # ✅ location
     ev.venue_name = (payload.venue_name or "").strip() or None
     ev.maps_url = (payload.maps_url or "").strip() or None
 
-    # ✅ NEW: replace event activity types mapping
+    # ✅ replace event activity types mapping
     await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
     for at_id in getattr(payload, "activity_type_ids", []) or []:
         db.add(EventActivityType(event_id=event_id, activity_type_id=int(at_id)))
@@ -197,7 +177,6 @@ async def student_events(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    # controller returns list[dict] already (safe for end_time)
     return await list_active_events(db)
 
 
@@ -214,6 +193,17 @@ async def student_event_detail(
     return _event_out_dict(ev)
 
 
+# ✅ Certificates list for this student + this event
+@router.get("/student/events/{event_id}/certificates", response_model=list[StudentCertificateOut])
+async def student_event_certificates(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    # ✅ IMPORTANT: returns [] if none, not 404
+    return await list_student_event_certificates(db=db, student_id=student.id, event_id=event_id)
+
+
 @router.post("/student/events/{event_id}/register", response_model=RegisterOut)
 async def register_event(
     event_id: int,
@@ -223,11 +213,7 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
-# ✅ Multi-image upload (writes to activity_photos)
-@router.post(
-    "/student/submissions/{submission_id}/photos",
-    response_model=PhotosUploadOut,
-)
+@router.post("/student/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),

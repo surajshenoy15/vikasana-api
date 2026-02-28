@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 from app.models.student import Student
 
-# ✅ Activity tracking (for hours & points calculation during event window)
+# ✅ Activity tracking
 from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_type import ActivityType
 
@@ -24,8 +24,8 @@ from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
 from app.core.config import settings
 
-# ✅ MinIO upload
-from app.core.cert_storage import upload_certificate_pdf_bytes
+# ✅ MinIO upload + presign
+from app.core.cert_storage import upload_certificate_pdf_bytes, presign_certificate_download_url
 
 # ✅ Thumbnail presign
 from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
@@ -226,7 +226,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # hours for that type inside event window
+            # hours for that type inside event window (only APPROVED activity sessions)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -238,8 +238,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             )
             hours = float(hrs_q.scalar() or 0.0)
 
-            # points rule: 2 points per 1 hour per activity type
-            points = int(hours * 2)
+            # points rule: 2 points per 1 hour per activity type (change if you want)
+            _points = int(hours * 2)
 
             # activity type name
             atq = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
@@ -262,7 +262,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             sig = sign_cert(cert.id)
             verify_url = f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify?cert_id={cert.id}&sig={sig}"
 
-            # NOTE: if you want hours/points printed, update build_certificate_pdf signature
+            # If you want hours/points printed, extend build_certificate_pdf signature.
             pdf_bytes = build_certificate_pdf(
                 certificate_no=cert_no,
                 issue_date=now_ist.strftime("%d.%m.%Y"),
@@ -279,6 +279,51 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     await db.commit()
     return issued
+
+
+# =========================================================
+# ---------------------- CERT LIST (STUDENT) ----------------
+# =========================================================
+
+async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
+    """
+    ✅ Used by: GET /student/events/{event_id}/certificates
+    ✅ Only return certs for APPROVED submissions (extra safety)
+    """
+    q = await db.execute(
+        select(Certificate, EventSubmission)
+        .join(EventSubmission, EventSubmission.id == Certificate.submission_id)
+        .where(
+            Certificate.student_id == student_id,
+            Certificate.event_id == event_id,
+            Certificate.revoked_at.is_(None),
+            EventSubmission.status == "approved",
+        )
+        .order_by(Certificate.issued_at.desc(), Certificate.id.desc())
+    )
+
+    rows = q.all()
+    out: list[dict] = []
+    for cert, sub in rows:
+        pdf_url = None
+        if cert.pdf_path:
+            try:
+                pdf_url = presign_certificate_download_url(cert.pdf_path, expires_in=3600)
+            except:
+                pdf_url = None
+
+        out.append(
+            {
+                "id": cert.id,
+                "certificate_no": cert.certificate_no,
+                "issued_at": cert.issued_at,
+                "event_id": cert.event_id,
+                "submission_id": cert.submission_id,
+                "activity_type_id": getattr(cert, "activity_type_id", None),
+                "pdf_url": pdf_url,
+            }
+        )
+    return out
 
 
 # =========================================================
@@ -449,6 +494,10 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
+    """
+    NOTE: Your current logic returns today & future events.
+    Past events shown in app are derived by is_active=false + date/time logic on frontend.
+    """
     today_ist = _now_ist_naive().date()
 
     q = await db.execute(
@@ -462,7 +511,6 @@ async def list_active_events(db: AsyncSession):
         )
     )
     events = q.scalars().all()
-    # ✅ convert end_time for response safety
     return [_event_out_dict(e) for e in events]
 
 
@@ -496,10 +544,6 @@ async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
 
     return {"submission_id": submission.id, "status": submission.status}
 
-
-# =========================================================
-# ---------------------- PHOTO UPLOAD ----------------------
-# =========================================================
 
 async def add_photo(
     db: AsyncSession,
@@ -556,10 +600,6 @@ async def add_photo(
     await db.refresh(photo)
     return photo
 
-
-# =========================================================
-# ---------------------- FINAL SUBMIT ----------------------
-# =========================================================
 
 async def final_submit(db: AsyncSession, submission_id: int, student_id: int, description: str):
     q = await db.execute(
