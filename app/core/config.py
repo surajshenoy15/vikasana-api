@@ -3,7 +3,11 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# ✅ This file is: app/core/config.py
+# Path(__file__) -> .../app/core/config.py
+# parent        -> .../app/core
+# parent.parent -> .../app  ✅ we want this
+APP_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
@@ -27,16 +31,14 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────
     # CORS
-    # Comma-separated list in .env
-    # Example:
-    # ALLOWED_ORIGINS=http://localhost:5173,http://31.97.230.171:5173
     # ─────────────────────────────────────────────────────
     ALLOWED_ORIGINS: str = (
         "http://localhost:5173,"
         "http://127.0.0.1:5173,"
         "http://31.97.230.171:5173,"
         "http://31.97.230.171,"
-        "https://31.97.230.171"
+        "https://31.97.230.171,"
+        "https://31.97.230.171:5173"
     )
 
     # ─────────────────────────────────────────────────────
@@ -51,9 +53,10 @@ class Settings(BaseSettings):
     CERT_SIGNING_SECRET: str
     PUBLIC_BASE_URL: str
 
-    # ✅ Certificate Template Path (NEW — fixes your error)
+    # ✅ Certificate Template Path (FIXED)
+    # will resolve to: .../app/assets/certificate_template.pdf
     CERT_TEMPLATE_PDF_PATH: str = str(
-        BASE_DIR / "assets" / "certificate_template.pdf"
+        APP_DIR / "assets" / "certificate_template.pdf"
     )
 
     # ─────────────────────────────────────────────────────
@@ -96,22 +99,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore",  # safer in production
+        extra="ignore",
     )
 
-    # ─────────────────────────────────────────────────────
-    # Helpers
-    # ─────────────────────────────────────────────────────
     @property
     def origins_list(self) -> list[str]:
-        """
-        Returns clean list of allowed CORS origins.
-        """
-        return [
-            o.strip()
-            for o in self.ALLOWED_ORIGINS.split(",")
-            if o.strip()
-        ]
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
 
 
 @lru_cache()
