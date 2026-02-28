@@ -390,34 +390,27 @@ async def create_event(db: AsyncSession, payload):
 
 
 async def end_event(db: AsyncSession, event_id: int):
-    """
-    ✅ End event
-    ✅ Expire in_progress registrations
-    ✅ Generate certificates ONLY for APPROVED submissions (per activity type)
-    """
+
+    # 1️⃣ Mark event as ended
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    event.is_active = False
+    event.is_active = False  # or event.ended_at = datetime.utcnow()
 
+    # 2️⃣ Expire ONLY unfinished submissions
     await db.execute(
         update(EventSubmission)
         .where(
             EventSubmission.event_id == event_id,
-            EventSubmission.status == "in_progress",
+            EventSubmission.status.in_(["IN_PROGRESS", "DRAFT"])
         )
-        .values(status="expired")
+        .values(status="EXPIRED")
     )
 
     await db.commit()
-    await db.refresh(event)
 
-    # ✅ generate certificates now
-    await _issue_certificates_for_event(db, event)
-
-    await db.refresh(event)
-    return _event_out_dict(event)
+    return {"message": "Event ended successfully"}
 
 
 async def delete_event(db: AsyncSession, event_id: int) -> None:
