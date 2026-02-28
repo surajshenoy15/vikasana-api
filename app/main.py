@@ -33,7 +33,7 @@ from app.routes.students import (
 from app.routes.face_routes import router as face_router
 from app.routes.admin_sessions import router as admin_sessions_router
 from app.routes.activity_types import router as activity_types_router
-from app.routes.public_certificates import router as public_certificates_router
+from app.routes.public_verify import router as public_verify_router
 from app.routes.student_certificates import router as student_certificates_router
 
 
@@ -130,7 +130,7 @@ app.include_router(admin_sessions_router, prefix="/api")
 app.include_router(activity_types_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
 
-app.include_router(public_certificates_router, prefix="/api")
+app.include_router(public_verify_router, prefix="/api")
 app.include_router(student_certificates_router, prefix="/api")
 
 app.include_router(activity_summary_router, prefix="/api")

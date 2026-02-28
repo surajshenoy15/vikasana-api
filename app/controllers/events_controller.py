@@ -461,9 +461,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
             sig = sign_cert(cert.certificate_no)
 
-            # ✅ LINK POINTS TO public_verify.py route now
+            # ✅ Correct link (since public_verify.py uses /public/certificates)
             verify_url = (
-                f"{settings.PUBLIC_BASE_URL}/api/public/verify/verify"
+                f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
             )
 
