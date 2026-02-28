@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.cert_sign import verify_sig
 from app.models.certificate import Certificate
 
-router = APIRouter(prefix="/public/certificates", tags=["Public - Certificates"])
+router = APIRouter(prefix="/public/verify", tags=["Public - Verify"])
 
 
 def _fmt(dt):
