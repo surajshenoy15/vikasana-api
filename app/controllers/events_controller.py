@@ -342,29 +342,26 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
 
 
+from sqlalchemy import select, func, cast, String
+from datetime import datetime, timezone
+from urllib.parse import quote
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
-    """
-    ✅ Only APPROVED event_submissions
-    ✅ 1 certificate per activity_type for event
-    ✅ If event has no mapping, infer activity types from approved sessions inside event window
-    """
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.event_id == event.id,
-            func.lower(EventSubmission.status) == "approved",
+            func.lower(cast(EventSubmission.status, String)) == "approved",
         )
     )
     submissions = q.scalars().all()
     if not submissions:
         return 0
 
-    # ✅ mapped activity types
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
 
-    # ✅ fallback if mapping missing: infer from sessions in event window
+    start_utc, end_utc = _event_window_utc(event)
+
     if not activity_type_ids:
-        start_utc, end_utc = _event_window_utc(event)
         aq = await db.execute(
             select(func.distinct(ActivitySession.activity_type_id)).where(
                 ActivitySession.status == ActivitySessionStatus.APPROVED,
@@ -378,13 +375,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not activity_type_ids:
         return 0
 
-    start_utc, end_utc = _event_window_utc(event)
-
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_naive()
     academic_year = _academic_year_from_date(now_ist)
 
-    # ✅ Venue name from admin event form
     venue_name = (
         getattr(event, "venue_name", None)
         or getattr(event, "venue", None)
@@ -392,21 +386,30 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         or ""
     ).strip() or "N/A"
 
+    student_ids = sorted({int(s.student_id) for s in submissions})
+    st_q = await db.execute(select(Student).where(Student.id.in_(student_ids)))
+    students = st_q.scalars().all()
+    student_by_id = {int(s.id): s for s in students}
+
+    at_q = await db.execute(select(ActivityType).where(ActivityType.id.in_(activity_type_ids)))
+    ats = at_q.scalars().all()
+    at_by_id = {int(a.id): a for a in ats}
+
     issued = 0
 
     for sub in submissions:
-        sq = await db.execute(select(Student).where(Student.id == sub.student_id))
-        student = sq.scalar_one_or_none()
+        student = student_by_id.get(int(sub.student_id))
         if not student:
             continue
 
-        student_name = getattr(student, "name", None) or "Student"
-        usn = getattr(student, "usn", None) or ""
+        student_name = (getattr(student, "name", None) or "Student").strip()
+        usn = (getattr(student, "usn", None) or "").strip()
 
         for at_id in activity_type_ids:
-            # skip if already issued
+            at_id = int(at_id)
+
             ex = await db.execute(
-                select(Certificate).where(
+                select(Certificate.id).where(
                     Certificate.submission_id == sub.id,
                     Certificate.activity_type_id == at_id,
                 )
@@ -427,24 +430,21 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if hours <= 0:
                 continue
 
-            atq = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
-            at = atq.scalar_one_or_none()
-            activity_type_name = (getattr(at, "name", None) or "").strip() or "Social Activity"
+            at = at_by_id.get(at_id)
+            activity_type_name = ((getattr(at, "name", None) or "").strip() or "Social Activity")
 
-            # ✅ Decide activity points:
-            # If ActivityType has points_per_unit + hours_per_unit, compute; else fallback.
             points_awarded = 0
-            ppu = getattr(at, "points_per_unit", None)
-            hpu = getattr(at, "hours_per_unit", None)
+            if at:
+                ppu = getattr(at, "points_per_unit", None)
+                hpu = getattr(at, "hours_per_unit", None)
 
-            if ppu is not None and hpu:
-                try:
-                    points_awarded = int(round((hours / float(hpu)) * float(ppu)))
-                except Exception:
-                    points_awarded = int(ppu) if ppu is not None else 0
-            else:
-                # fallback if you have a fixed points field
-                points_awarded = int(getattr(at, "points", 0) or 0)
+                if ppu is not None and hpu:
+                    try:
+                        points_awarded = int(round((hours / float(hpu)) * float(ppu)))
+                    except Exception:
+                        points_awarded = int(ppu) if ppu is not None else 0
+                else:
+                    points_awarded = int(getattr(at, "points", 0) or 0)
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -459,11 +459,11 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             db.add(cert)
             await db.flush()
 
-            # ✅ Sign using certificate_no (NOT cert.id)
             sig = sign_cert(cert.certificate_no)
 
+            # ✅ LINK POINTS TO public_verify.py route now
             verify_url = (
-                f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
+                f"{settings.PUBLIC_BASE_URL}/api/public/verify/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
             )
 
@@ -474,8 +474,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 student_name=student_name,
                 usn=usn,
                 activity_type=activity_type_name,
-                venue_name=venue_name,                 # ✅ admin Venue Name
-                activity_points=int(points_awarded),   # ✅ points on certificate
+                venue_name=venue_name,
+                activity_points=int(points_awarded),
                 verify_url=verify_url,
             )
 

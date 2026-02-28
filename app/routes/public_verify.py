@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Query, HTTPException, Depends, Request
+from fastapi import APIRouter, Query, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -8,7 +8,8 @@ from app.core.database import get_db
 from app.core.cert_sign import verify_sig
 from app.models.certificate import Certificate
 
-router = APIRouter(prefix="/public/verify", tags=["Public - Verify"])
+# ✅ MUST MATCH QR URL: /api/public/certificates/verify
+router = APIRouter(prefix="/public/certificates", tags=["Public - Certificates"])
 
 
 def _fmt(dt):
@@ -109,7 +110,7 @@ async def verify_certificate(
     stmt = (
         select(Certificate)
         .options(selectinload(Certificate.student), selectinload(Certificate.event))
-        .where(Certificate.certificate_no == cert_id)  # ✅ lookup by certificate_no
+        .where(Certificate.certificate_no == cert_id)
     )
     res = await db.execute(stmt)
     cert = res.scalar_one_or_none()
