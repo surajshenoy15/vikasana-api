@@ -12,7 +12,10 @@ from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 from app.models.student import Student
 
 # ✅ Certificates
-from app.models.certificate import Certificate, CertificateCounter
+from app.models import certificate as certificate_module
+
+Certificate = certificate_module.Certificate
+CertificateCounter = certificate_module.CertificateCounter
 from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
 from app.core.config import settings
