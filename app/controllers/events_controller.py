@@ -357,23 +357,17 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
+    # ✅ STRICT: always use event mapped activity types
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
+    activity_type_ids = sorted(set(int(x) for x in activity_type_ids if x is not None))
+
+    if not activity_type_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No activity types configured for this event. Please select activity types while creating the event.",
+        )
 
     start_utc, end_utc = _event_window_utc(event)
-
-    if not activity_type_ids:
-        aq = await db.execute(
-            select(func.distinct(ActivitySession.activity_type_id)).where(
-                ActivitySession.status == ActivitySessionStatus.APPROVED,
-                ActivitySession.started_at >= start_utc,
-                ActivitySession.started_at <= end_utc,
-                ActivitySession.activity_type_id.is_not(None),
-            )
-        )
-        activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
-
-    if not activity_type_ids:
-        return 0
 
     now_utc = datetime.now(timezone.utc)
     now_ist = _now_ist_naive()
@@ -406,8 +400,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = (getattr(student, "usn", None) or "").strip()
 
         for at_id in activity_type_ids:
-            at_id = int(at_id)
-
+            # ✅ avoid duplicates
             ex = await db.execute(
                 select(Certificate.id).where(
                     Certificate.submission_id == sub.id,
@@ -417,6 +410,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
+            # ✅ hours for this activity type within event window
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -427,12 +421,15 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 )
             )
             hours = float(hrs_q.scalar() or 0.0)
+
+            # If you want certificate even with 0 hours, remove this check.
             if hours <= 0:
                 continue
 
             at = at_by_id.get(at_id)
-            activity_type_name = ((getattr(at, "name", None) or "").strip() or "Social Activity")
+            activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
 
+            # points calc
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
@@ -461,7 +458,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
             sig = sign_cert(cert.certificate_no)
 
-            # ✅ Correct link (since public_verify.py uses /public/certificates)
             verify_url = (
                 f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
@@ -473,7 +469,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 issue_date=(cert.issued_at.date().isoformat() if cert.issued_at else now_ist.date().isoformat()),
                 student_name=student_name,
                 usn=usn,
-                activity_type=activity_type_name,
+                activity_type=activity_type_name,  # ✅ backend name goes into PDF
                 venue_name=venue_name,
                 activity_points=int(points_awarded),
                 verify_url=verify_url,
@@ -494,7 +490,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
 async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
     q = await db.execute(
-        select(Certificate)
+        select(Certificate, ActivityType.name)
+        .join(ActivityType, ActivityType.id == Certificate.activity_type_id)
         .where(
             Certificate.student_id == student_id,
             Certificate.event_id == event_id,
@@ -502,10 +499,11 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
         )
         .order_by(Certificate.issued_at.desc(), Certificate.id.desc())
     )
-    certs = q.scalars().all()
+
+    rows = q.all()
 
     out = []
-    for cert in certs:
+    for cert, at_name in rows:
         pdf_url = None
         if cert.pdf_path:
             try:
@@ -519,7 +517,8 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
             "issued_at": cert.issued_at,
             "event_id": cert.event_id,
             "submission_id": cert.submission_id,
-            "activity_type_id": getattr(cert, "activity_type_id", None),
+            "activity_type_id": cert.activity_type_id,
+            "activity_type_name": at_name,  # ✅ now UI shows proper name
             "pdf_url": pdf_url,
         })
     return out
@@ -579,11 +578,10 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 
 async def create_event(db: AsyncSession, payload):
-    # ✅ DEBUG LOGS (ADD THIS)
+    # ✅ DEBUG LOGS (keep)
     try:
         print("=== CREATE EVENT DEBUG ===")
         print("Payload type:", type(payload))
-        # Pydantic v1/v2 safe dump
         if hasattr(payload, "model_dump"):
             print("Payload dict:", payload.model_dump())
         elif hasattr(payload, "dict"):
@@ -594,20 +592,25 @@ async def create_event(db: AsyncSession, payload):
         print("activity_type_ids:", getattr(payload, "activity_type_ids", None))
         print("activity_list:", getattr(payload, "activity_list", None))
 
-        # very important: see OTHER possible keys frontend might send
         for k in ["activity_types", "activityTypeIds", "activityTypes", "activity_type_id", "activity_type"]:
             print(f"{k}:", getattr(payload, k, None))
-
         print("==========================")
     except Exception as e:
         print("CREATE EVENT DEBUG FAILED:", e)
 
     """
-    Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
-    Also stores selected activity types into event_activity_types table.
+    ✅ UPDATED:
+    - Uses flush (not commit) to get event.id
+    - Saves event + mapping rows in ONE transaction (atomic)
+    - Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
     """
+
     event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
-    start_time = getattr(payload, "start_time", None) or getattr(payload, "event_time", None) or getattr(payload, "time", None)
+    start_time = (
+        getattr(payload, "start_time", None)
+        or getattr(payload, "event_time", None)
+        or getattr(payload, "time", None)
+    )
     end_time_raw = getattr(payload, "end_time", None)
 
     end_time_dt = None
@@ -624,8 +627,8 @@ async def create_event(db: AsyncSession, payload):
 
     event = Event(
         title=payload.title,
-        description=payload.description,
-        required_photos=int(payload.required_photos or 3),
+        description=getattr(payload, "description", None),
+        required_photos=int(getattr(payload, "required_photos", 3) or 3),
         is_active=True,
         event_date=event_date,
         start_time=start_time,
@@ -635,33 +638,49 @@ async def create_event(db: AsyncSession, payload):
         maps_url=maps_url,
     )
     db.add(event)
-    await db.commit()
-    await db.refresh(event)
+
+    # ✅ flush first to get event.id (no commit yet)
+    await db.flush()
 
     # ─────────────────────────────────────────────────────
     # ✅ Save selected activity types for this event
     # ─────────────────────────────────────────────────────
 
     ids: list[int] = []
+
     raw_ids = getattr(payload, "activity_type_ids", None) or []
+    # also accept possible frontend variants (optional)
+    if not raw_ids:
+        raw_ids = getattr(payload, "activityTypeIds", None) or getattr(payload, "activityTypes", None) or []
+
     for x in raw_ids:
         try:
-            ids.append(int(x))
+            v = int(x)
+            if v > 0:
+                ids.append(v)
         except Exception:
             pass
 
+    # fallback: map by names if frontend sends activity_list
     if not ids:
-        names = [str(x).strip() for x in (getattr(payload, "activity_list", None) or []) if str(x).strip()]
+        names = [
+            str(x).strip()
+            for x in (getattr(payload, "activity_list", None) or [])
+            if str(x).strip()
+        ]
         if names:
             rq = await db.execute(select(ActivityType.id).where(ActivityType.name.in_(names)))
-            ids = [int(r[0]) for r in rq.all()]
+            ids = [int(r[0]) for r in rq.all() if r and r[0] is not None]
+
+    ids = sorted(set(ids))
 
     # ✅ DEBUG: show what IDs we will save
     print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
 
-    for at_id in sorted(set(ids)):
+    for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
 
+    # ✅ single commit for event + mapping
     await db.commit()
     await db.refresh(event)
 
@@ -723,10 +742,6 @@ async def list_event_submissions(db: AsyncSession, event_id: int):
 
 
 async def approve_submission(db: AsyncSession, submission_id: int):
-    """
-    Manual single approve (still works)
-    NOTE: certificates are better generated via auto_approve_event_from_sessions / regenerate.
-    """
     q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
     submission = q.scalar_one_or_none()
     if not submission:
@@ -741,6 +756,12 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     await db.commit()
     await db.refresh(submission)
+
+    # ✅ generate certificates for this event (idempotent, won't duplicate)
+    event = await db.get(Event, submission.event_id)
+    if event:
+        await _issue_certificates_for_event(db, event)
+
     return submission
 
 

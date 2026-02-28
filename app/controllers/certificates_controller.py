@@ -1,54 +1,83 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.models.certificate import CertificateCounter, Certificate
-from app.models.activity_session import ActivitySession
-from app.models.student import Student
-from app.models.events import Event
+from app.models.certificate import Certificate
+from app.models.event_activity_type import EventActivityType
+from app.models.activity_type import ActivityType
+from app.core.cert_sign import sign_cert
+from app.core.cert_pdf import build_certificate_pdf
+from app.core.cert_storage import upload_certificate_pdf_bytes
 
-
-def month_code(dt: datetime) -> str:
-    return dt.strftime("%b")  # Jan, Feb, ...
-
-
-async def next_certificate_no(db: AsyncSession, academic_year: str, dt: datetime) -> str:
-    m = month_code(dt)
-
-    stmt = select(CertificateCounter).where(
-        CertificateCounter.month_code == m,
-        CertificateCounter.academic_year == academic_year,
-    ).with_for_update()
-
-    res = await db.execute(stmt)
-    counter = res.scalar_one_or_none()
-
-    if counter is None:
-        counter = CertificateCounter(month_code=m, academic_year=academic_year, next_seq=1)
-        db.add(counter)
-        await db.flush()  # assign id
-
-    seq = counter.next_seq
-    counter.next_seq = seq + 1
-    counter.updated_at = datetime.utcnow()
-
-    # SEQ formatting: 619 or 000619? you can decide.
-    # If you want fixed width 3 digits: f"{seq:03d}"
-    return f"BG/VF/{m}{seq}/{academic_year}"
+from app.controllers.certificate_helpers import next_certificate_no
 
 
-async def get_session_full(db: AsyncSession, session_id: int) -> ActivitySession:
-    stmt = (
-        select(ActivitySession)
-        .options(
-            selectinload(ActivitySession.student),
-            selectinload(ActivitySession.event),
+async def generate_certificates_for_submission(
+    db: AsyncSession,
+    *,
+    submission_id: int,
+    student_id: int,
+    event_id: int,
+    academic_year: str,
+):
+    # 1) get selected activity types for the event
+    at_ids = (await db.execute(
+        select(EventActivityType.activity_type_id)
+        .where(EventActivityType.event_id == event_id)
+        .order_by(EventActivityType.activity_type_id.asc())
+    )).scalars().all()
+
+    at_ids = list(dict.fromkeys([int(x) for x in at_ids if x]))
+
+    if not at_ids:
+        raise ValueError("No activity types configured for this event.")
+
+    # 2) load names
+    ats = (await db.execute(select(ActivityType).where(ActivityType.id.in_(at_ids)))).scalars().all()
+    name_by_id = {a.id: a.name for a in ats}
+
+    now = datetime.now(timezone.utc)
+
+    for at_id in at_ids:
+        # ✅ idempotent: skip if already exists
+        existing = (await db.execute(
+            select(Certificate).where(
+                Certificate.submission_id == submission_id,
+                Certificate.activity_type_id == at_id,
+            )
+        )).scalar_one_or_none()
+        if existing:
+            continue
+
+        cert_no = await next_certificate_no(db, academic_year=academic_year, dt=now)
+        activity_type_name = name_by_id.get(at_id) or f"Activity Type #{at_id}"
+
+        signature = sign_cert(
+            certificate_no=cert_no,
+            student_id=student_id,
+            event_id=event_id,
+            activity_type_id=at_id,
         )
-        .where(ActivitySession.id == session_id)
-    )
-    res = await db.execute(stmt)
-    s = res.scalar_one_or_none()
-    if not s:
-        raise ValueError("Session not found")
-    return s
+
+        pdf_bytes = build_certificate_pdf(
+            certificate_no=cert_no,
+            student_id=student_id,
+            event_id=event_id,
+            activity_type_name=activity_type_name,
+            signature=signature,
+        )
+
+        object_key = f"certificates/event_{event_id}/student_{student_id}/{cert_no}.pdf"
+        await upload_certificate_pdf_bytes(object_key=object_key, pdf_bytes=pdf_bytes)
+
+        db.add(Certificate(
+            certificate_no=cert_no,
+            issued_at=now,
+            submission_id=submission_id,
+            student_id=student_id,
+            event_id=event_id,
+            activity_type_id=at_id,
+            pdf_path=object_key,
+        ))
+
+    await db.commit()

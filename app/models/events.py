@@ -36,7 +36,7 @@ class Event(Base):
     # So we store NAIVE datetime in controllers.
     end_time = Column(DateTime, nullable=True)
 
-    # ✅ NEW: Location fields (Admin "Location" section)
+    # ✅ Location fields
     venue_name = Column(String(255), nullable=True)
     maps_url = Column(Text, nullable=True)
 
@@ -46,6 +46,15 @@ class Event(Base):
     thumbnail_url = Column(String, nullable=True)
 
     submissions = relationship("EventSubmission", back_populates="event")
+
+    # ✅ NEW: mapping rows -> event_activity_types table
+    # This allows: event.activity_type_ids = [1, 5, ...] via mapping table
+    activity_types = relationship(
+        "EventActivityType",
+        primaryjoin="Event.id==EventActivityType.event_id",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
 
 class EventSubmission(Base):

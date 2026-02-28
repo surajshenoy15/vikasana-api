@@ -14,26 +14,52 @@ class CertificateCounter(Base):
     next_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
-
 class Certificate(Base):
     __tablename__ = "certificates"
     __table_args__ = (
-        UniqueConstraint("certificate_no", name="uq_certificate_no"),
         UniqueConstraint("submission_id", "activity_type_id", name="uq_cert_submission_activity"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    certificate_no: Mapped[str] = mapped_column(String(64), nullable=False)
-    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
-    submission_id: Mapped[int] = mapped_column(ForeignKey("event_submissions.id"), nullable=False)
-    student_id: Mapped[int] = mapped_column(ForeignKey("students.id"), nullable=False)
-    event_id: Mapped[int] = mapped_column(ForeignKey("events.id"), nullable=False)
+    certificate_no: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+    )
 
-    # ✅ REQUIRED
-    activity_type_id: Mapped[int] = mapped_column(ForeignKey("activity_types.id"), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=datetime.utcnow,
+    )
+
+    submission_id: Mapped[int] = mapped_column(
+        ForeignKey("event_submissions.id"),
+        nullable=False,
+        index=True,
+    )
+
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("students.id"),
+        nullable=False,
+        index=True,
+    )
+
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("events.id"),
+        nullable=False,
+        index=True,
+    )
+
+    activity_type_id: Mapped[int] = mapped_column(
+        ForeignKey("activity_types.id"),
+        nullable=False,
+        index=True,
+    )
 
     pdf_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoke_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
