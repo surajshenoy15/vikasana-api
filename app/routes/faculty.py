@@ -360,3 +360,31 @@ async def activation_set_password(
 async def activate(token: str = Query(...), db: AsyncSession = Depends(get_db)):
     await activate_faculty(token, db)
     return {"detail": "Account activated successfully."}
+
+
+from pydantic import BaseModel
+
+class VerifyQrRequest(BaseModel):
+    qr: str  # or qr_data / token depending on what you're sending
+
+@router.post("/verify-qr", summary="Verify QR (Faculty auth)")
+async def verify_qr(
+    body: VerifyQrRequest,
+    db: AsyncSession = Depends(get_db),
+    current_faculty: Faculty = Depends(get_current_faculty),
+):
+    qr = (body.qr or "").strip()
+    if not qr:
+        raise HTTPException(status_code=400, detail="qr is required")
+
+    # ✅ TODO: decode/validate QR content
+    # Example: if QR encodes session_id or student_id, parse it and validate.
+    # For now, just return success so your 405 is fixed and you can wire logic next.
+
+    return {
+        "ok": True,
+        "detail": "QR received",
+        "qr": qr,
+        "faculty_id": current_faculty.id,
+        "faculty_college": current_faculty.college,
+    }
