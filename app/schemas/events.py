@@ -2,17 +2,20 @@
 # app/schemas/events.py  ✅ FULL UPDATED (WITH LOCATION + ACTIVITY TYPES)
 # =========================================================
 
-from pydantic import BaseModel, Field
+
 from typing import Optional, List
 from datetime import datetime, date, time
-from pydantic import BaseModel, Field, AliasChoices, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Any
 from datetime import date, time
+from pydantic.config import ConfigDict
 
 
 # ------------------ EVENTS ------------------
 
 class EventCreateIn(BaseModel):
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     title: str
     description: Optional[str] = None
     required_photos: int = Field(3, ge=3, le=5)
@@ -24,52 +27,68 @@ class EventCreateIn(BaseModel):
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
 
-    # ✅ accept multiple frontend field names
-    activity_type_ids: List[int] = Field(
-        default_factory=list,
-        validation_alias=AliasChoices(
-            "activity_type_ids",
-            "activityTypeIds",
-            "activityTypes",
-            "activity_types",
-        ),
-    )
+    # ✅ Always end up as List[int]
+    activity_type_ids: List[int] = Field(default_factory=list)
 
+    # ✅ Pull ids from alternate frontend keys BEFORE validation
     @model_validator(mode="before")
     @classmethod
-    def normalize_activity_ids(cls, data: Any):
+    def _normalize_activity_keys(cls, data: Any):
         if not isinstance(data, dict):
             return data
 
-        raw = (
-            data.get("activity_type_ids")
-            or data.get("activityTypeIds")
-            or data.get("activityTypes")
-            or data.get("activity_types")
-            or []
-        )
+        # If frontend sends activityTypeIds / activityTypes / activity_types etc.
+        if "activity_type_ids" not in data or not data.get("activity_type_ids"):
+            for k in ["activityTypeIds", "activityTypes", "activity_types", "activity_type_id", "activity_list"]:
+                if k in data and data.get(k) is not None:
+                    data["activity_type_ids"] = data.get(k)
+                    break
 
-        # supports [{id: 6}, {id: 7}]
-        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
-            raw = [x.get("id") for x in raw]
-
-        # supports "6,7"
-        if isinstance(raw, str):
-            raw = [x.strip() for x in raw.split(",") if x.strip()]
-
-        ids: List[int] = []
-        if isinstance(raw, list):
-            for x in raw:
-                try:
-                    v = int(x)
-                    if v > 0:
-                        ids.append(v)
-                except Exception:
-                    pass
-
-        data["activity_type_ids"] = sorted(set(ids))
         return data
 
+    # ✅ Convert any shape -> List[int]
+    @field_validator("activity_type_ids", mode="before")
+    @classmethod
+    def _coerce_activity_type_ids(cls, v: Any):
+        if v is None:
+            return []
+
+        # "6,7"
+        if isinstance(v, str):
+            parts = [x.strip() for x in v.split(",") if x.strip()]
+            out = []
+            for x in parts:
+                try:
+                    out.append(int(x))
+                except Exception:
+                    pass
+            return out
+
+        # single int
+        if isinstance(v, int):
+            return [v]
+
+        # list of dicts: [{id: 6}, {id: 7}]
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            out = []
+            for obj in v:
+                try:
+                    out.append(int(obj.get("id")))
+                except Exception:
+                    pass
+            return out
+
+        # list of strings/ints: ["6","7"] or [6,7]
+        if isinstance(v, list):
+            out = []
+            for x in v:
+                try:
+                    out.append(int(x))
+                except Exception:
+                    pass
+            return out
+
+        return []
 
 class EventOut(BaseModel):
     id: int
