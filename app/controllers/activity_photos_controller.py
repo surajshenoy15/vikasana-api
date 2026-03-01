@@ -1,4 +1,5 @@
 # app/controllers/activity_photos_controller.py
+
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy import select, and_
@@ -7,7 +8,74 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.activity_photo import ActivityPhoto
 from app.models.activity_session import ActivitySession
+from app.models.activity_type import ActivityType
 from app.models.events import Event
+
+import math
+
+DEFAULT_RADIUS_M = 500
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """
+    Great-circle distance in meters between two lat/lng points.
+    """
+    R = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+async def _strict_geofence_check(
+    db: AsyncSession,
+    session: ActivitySession,
+    lat: float | None,
+    lng: float | None,
+) -> tuple[float | None, bool, str | None]:
+    """
+    STRICT POLICY:
+    - If ActivityType has target_lat/target_lng => enforce radius_m
+    - If GPS missing => reject
+    - If outside => reject
+
+    Returns (distance_m, is_in_geofence, geo_flag_reason)
+    """
+    at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
+    at = at_res.scalar_one_or_none()
+
+    # If no activity type found, don't geofence here (shouldn't happen)
+    if not at:
+        return None, True, None
+
+    target_lat = getattr(at, "target_lat", None)
+    target_lng = getattr(at, "target_lng", None)
+    radius_m = int(getattr(at, "radius_m", DEFAULT_RADIUS_M) or DEFAULT_RADIUS_M)
+
+    # If admin didn't configure target, allow
+    if target_lat is None or target_lng is None:
+        return None, True, None
+
+    # Admin configured target => GPS must be present
+    if lat is None or lng is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Location is required for this activity. Please enable GPS and try again.",
+        )
+
+    distance_m = _haversine_m(float(lat), float(lng), float(target_lat), float(target_lng))
+
+    # Outside => reject
+    if distance_m > radius_m:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Outside allowed area. You are ~{int(distance_m)}m away. Allowed radius is {radius_m}m.",
+        )
+
+    return distance_m, True, None
 
 
 async def add_activity_photo(
@@ -20,11 +88,15 @@ async def add_activity_photo(
     lng: float,
     captured_at: datetime | None = None,
     sha256: str | None = None,
-    # ✅ new
-    distance_m: float | None = None,
-    is_in_geofence: bool = True,
-    geo_flag_reason: str | None = None,
 ):
+    """
+    Adds (or updates) a photo row for a session.
+
+    ✅ STRICT geofence enforcement:
+    - If activity_type has target location => upload allowed ONLY within radius_m (default 500m)
+    - If GPS missing => reject
+    """
+
     # 1) Validate session belongs to student
     res = await db.execute(
         select(ActivitySession).where(
@@ -83,6 +155,9 @@ async def add_activity_photo(
         dup = await db.execute(q)
         is_duplicate = dup.scalar_one_or_none() is not None
 
+    # ✅ 6) STRICT Geofence check BEFORE saving
+    distance_m, is_in_geofence, geo_flag_reason = await _strict_geofence_check(db, session, lat, lng)
+
     try:
         if existing:
             existing.image_url = image_url
@@ -93,7 +168,7 @@ async def add_activity_photo(
             if sha256 is not None and has_sha_col:
                 existing.sha256 = sha256
 
-            # ✅ save geofence fields
+            # ✅ store geofence fields
             existing.distance_m = distance_m
             existing.is_in_geofence = bool(is_in_geofence)
             existing.geo_flag_reason = geo_flag_reason
@@ -101,6 +176,7 @@ async def add_activity_photo(
             await db.commit()
             await db.refresh(existing)
             photo = existing
+
         else:
             payload = dict(
                 session_id=session_id,
@@ -116,6 +192,7 @@ async def add_activity_photo(
             )
             if sha256 is not None and has_sha_col:
                 payload["sha256"] = sha256
+
             photo = ActivityPhoto(**payload)
             db.add(photo)
             await db.commit()
