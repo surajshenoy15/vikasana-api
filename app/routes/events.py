@@ -1,7 +1,8 @@
-# app/routes/events.py
+# app/routes/events.py  ✅ FULL UPDATED (clean + permanent fix)
+from __future__ import annotations
+
 from typing import List
-from datetime import datetime, date as date_type,time as time_type
-from zoneinfo import ZoneInfo
+from datetime import datetime, date as date_type, time as time_type, timezone
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,8 +15,6 @@ from app.core.activity_storage import upload_activity_image
 from app.models.activity_session import ActivitySession
 from app.models.activity_photo import ActivityPhoto
 from app.models.events import Event
-
-# ✅ event ↔ activity_type mapping
 from app.models.event_activity_type import EventActivityType
 
 from app.schemas.events import (
@@ -31,7 +30,6 @@ from app.schemas.events import (
     ThumbnailUploadUrlOut,
 )
 
-# ✅ certificates schema
 from app.schemas.certificate import StudentCertificateOut
 
 from app.controllers.events_controller import (
@@ -46,25 +44,29 @@ from app.controllers.events_controller import (
     get_event_thumbnail_upload_url,
     end_event,
     list_student_event_certificates,
-    regenerate_event_certificates, 
-    auto_approve_event_from_sessions, # ✅ NEW (top approve button)
+    regenerate_event_certificates,
+    auto_approve_event_from_sessions,
 )
 
 router = APIRouter(tags=["Events"])
-IST = ZoneInfo("Asia/Kolkata")
 
 
-def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
-    return datetime.combine(event_date, t).replace(tzinfo=None)
-
-
-from datetime import datetime, time as time_type, date as date_type
-from fastapi import HTTPException
+# =========================================================
+# ---------------------- HELPERS --------------------------
+# =========================================================
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
+    # DB stores TIMESTAMP WITHOUT TZ for end_time
     return datetime.combine(event_date, t).replace(tzinfo=None)
+
 
 def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
+    """
+    Accepts:
+      - None
+      - time -> converts to naive datetime using event_date
+      - datetime -> strips tzinfo to naive
+    """
     if end_val is None:
         return None
 
@@ -101,9 +103,39 @@ def _event_out_dict(ev: Event) -> dict:
     }
 
 
-# ══════════════════════════════════════════════
-# ADMIN — Events CRUD
-# ══════════════════════════════════════════════
+def _normalize_activity_type_ids(payload: EventCreateIn) -> list[int]:
+    """
+    ✅ Permanent fix:
+    Normalize whatever frontend sends into a clean list[int]
+    AND enforce at least 1 id.
+    """
+    raw = getattr(payload, "activity_type_ids", None) or []
+
+    # sometimes frontend sends objects [{id:1},{id:2}]
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        raw = [x.get("id") for x in raw]
+
+    # sometimes frontend sends csv string "1,2"
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",") if x.strip()]
+
+    ids: list[int] = []
+    if isinstance(raw, list):
+        for x in raw:
+            try:
+                v = int(x)
+                if v > 0:
+                    ids.append(v)
+            except Exception:
+                pass
+
+    ids = sorted(set(ids))
+    return ids
+
+
+# =========================================================
+# ---------------------- ADMIN -----------------------------
+# =========================================================
 
 @router.post("/admin/events", response_model=EventOut)
 async def admin_create_event_api(
@@ -111,6 +143,7 @@ async def admin_create_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
+    # create_event() already blocks if no activity types (permanent fix)
     return await create_event(db, payload)
 
 
@@ -139,7 +172,12 @@ async def admin_update_event_api(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    ev.title = payload.title.strip()
+    # ✅ Permanent fix: force activity types while updating too
+    ids = _normalize_activity_type_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
+
+    ev.title = (payload.title or "").strip()
     ev.description = (payload.description or "").strip() or None
     ev.required_photos = int(payload.required_photos or 3)
 
@@ -151,10 +189,10 @@ async def admin_update_event_api(
     ev.venue_name = (payload.venue_name or "").strip() or None
     ev.maps_url = (payload.maps_url or "").strip() or None
 
-    # ✅ replace event activity types mapping
+    # ✅ replace mapping atomically
     await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
-    for at_id in getattr(payload, "activity_type_ids", []) or []:
-        db.add(EventActivityType(event_id=event_id, activity_type_id=int(at_id)))
+    for at_id in ids:
+        db.add(EventActivityType(event_id=event_id, activity_type_id=at_id))
 
     await db.commit()
     await db.refresh(ev)
@@ -180,7 +218,6 @@ async def admin_end_event_api(
 
 
 # ✅ One-click: auto approve (face verified) + issue certificates
-
 @router.post("/admin/events/{event_id}/approve-and-issue")
 async def admin_auto_approve_and_issue(
     event_id: int,
@@ -190,7 +227,7 @@ async def admin_auto_approve_and_issue(
     return await auto_approve_event_from_sessions(db, event_id)
 
 
-# ✅ Admin can still regenerate certificates if needed (idempotent)
+# ✅ Regenerate certificates (idempotent)
 @router.post("/admin/events/{event_id}/certificates/regenerate")
 async def admin_regenerate_event_certificates(
     event_id: int,
@@ -198,13 +235,7 @@ async def admin_regenerate_event_certificates(
     admin=Depends(get_current_admin),
 ):
     return await regenerate_event_certificates(db, event_id)
-@router.post("/admin/events/{event_id}/auto-approve")
-async def admin_auto_approve_event(
-    event_id: int,
-    db: AsyncSession = Depends(get_db),
-    admin=Depends(get_current_admin),
-):
-    return await auto_approve_event_from_sessions(db, event_id)
+
 
 @router.get("/admin/events", response_model=list[EventOut])
 async def admin_list_events_api(
@@ -215,9 +246,10 @@ async def admin_list_events_api(
     events = res.scalars().all()
     return [_event_out_dict(ev) for ev in events]
 
-# ══════════════════════════════════════════════
-# STUDENT — Events
-# ══════════════════════════════════════════════
+
+# =========================================================
+# ---------------------- STUDENT ---------------------------
+# =========================================================
 
 @router.get("/student/events", response_model=list[EventOut])
 async def student_events(
@@ -258,6 +290,8 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
+# NOTE: This endpoint is currently using ActivitySession/ActivityPhoto model.
+# If this is actually EVENT submission photos, you should switch to EventSubmissionPhoto logic.
 @router.post("/student/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
@@ -305,12 +339,13 @@ async def upload_photos(
         )
         existing = photo_res.scalar_one_or_none()
 
+        now_utc = datetime.now(timezone.utc)
         if existing:
             existing.image_url = image_url
             existing.student_id = student.id
             existing.lat = float(lats[idx])
             existing.lng = float(lngs[idx])
-            existing.captured_at = datetime.utcnow()
+            existing.captured_at = now_utc
             photo = existing
         else:
             photo = ActivityPhoto(
@@ -320,7 +355,7 @@ async def upload_photos(
                 image_url=image_url,
                 lat=float(lats[idx]),
                 lng=float(lngs[idx]),
-                captured_at=datetime.utcnow(),
+                captured_at=now_utc,
             )
             db.add(photo)
 
@@ -342,9 +377,9 @@ async def submit_event(
     return await final_submit(db, submission_id, student.id, payload.description)
 
 
-# ══════════════════════════════════════════════
-# ADMIN — Review submissions
-# ══════════════════════════════════════════════
+# =========================================================
+# ---------------------- ADMIN REVIEW ----------------------
+# =========================================================
 
 @router.get("/admin/events/{event_id}/submissions", response_model=list[AdminSubmissionOut])
 async def admin_list_event_submissions(

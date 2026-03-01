@@ -64,6 +64,25 @@ def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> da
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
+def _extract_activity_type_ids(payload) -> list[int]:
+    raw = getattr(payload, "activity_type_ids", None)
+
+    # accept string: "6,7"
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",") if x.strip()]
+
+    ids: list[int] = []
+    if isinstance(raw, list):
+        for x in raw:
+            try:
+                v = int(x)
+                if v > 0:
+                    ids.append(v)
+            except Exception:
+                pass
+
+    return sorted(set(ids))
+
 def _ensure_event_window(event: Event) -> None:
     now_dt = _now_ist_naive()
     now_date = now_dt.date()
@@ -579,11 +598,12 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 
 async def create_event(db: AsyncSession, payload):
     """
-    ✅ UPDATED:
+    ✅ UPDATED (PERMANENT FIX):
     - Uses flush (not commit) to get event.id
     - Saves event + mapping rows in ONE transaction (atomic)
     - Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
     - ✅ Robustly accepts activity type ids from multiple frontend shapes
+    - ✅ BLOCKS creation if NO activity types selected (prevents empty mapping forever)
     """
 
     # ✅ DEBUG LOGS (keep)
@@ -624,7 +644,10 @@ async def create_event(db: AsyncSession, payload):
             end_time_dt = end_time_raw.replace(tzinfo=None)
         elif isinstance(end_time_raw, time_type):
             if not event_date:
-                raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+                raise HTTPException(
+                    status_code=422,
+                    detail="event_date is required when end_time is a time value",
+                )
             end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
 
     venue_name = getattr(payload, "venue_name", None)
@@ -648,7 +671,7 @@ async def create_event(db: AsyncSession, payload):
     await db.flush()
 
     # ─────────────────────────────────────────────────────
-    # ✅ Save selected activity types for this event (ROBUST)
+    # ✅ Save selected activity types for this event (ROBUST + REQUIRED)
     # ─────────────────────────────────────────────────────
     ids: list[int] = []
 
@@ -698,8 +721,13 @@ async def create_event(db: AsyncSession, payload):
 
     print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
 
-    # Optional: clear previous mapping if you allow editing (safe for create too)
-    # await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event.id))
+    # ✅ PERMANENT FIX: never allow creating an event without mapping
+    if not ids:
+        await db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail="Please select at least 1 activity type for this event.",
+        )
 
     for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))

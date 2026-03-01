@@ -24,7 +24,7 @@ class EventCreateIn(BaseModel):
 
     # ✅ NEW (Admin selects these activity types for the event)
     # Example: [1, 5] => Energy conservation + Rural product marketing
-    activity_type_ids: List[int] = []
+    activity_type_ids: List[int] = Field(default_factory=list)
 
 
 class EventOut(BaseModel):
