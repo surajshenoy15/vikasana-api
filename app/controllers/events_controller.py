@@ -5,6 +5,7 @@ from datetime import datetime, date as date_type, time as time_type, timezone
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
 from urllib.parse import quote
+from sqlalchemy import delete
 
 from fastapi import HTTPException
 from sqlalchemy import select, func, delete as sql_delete, update, cast, String
@@ -218,7 +219,17 @@ def _event_out_dict(event: Event) -> dict:
         "thumbnail_url": getattr(event, "thumbnail_url", None),
     }
 
+async def _sync_event_activity_types(db: AsyncSession, event_id: int, ids: list[int]) -> None:
+    # delete old mappings
+    await db.execute(
+        delete(EventActivityType).where(EventActivityType.event_id == event_id)
+    )
 
+    # insert new mappings
+    for at_id in ids:
+        db.add(EventActivityType(event_id=event_id, activity_type_id=int(at_id)))
+
+    await db.flush()
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -599,10 +610,12 @@ async def create_event(db: AsyncSession, payload):
     """
     ✅ FIXED create_event:
     - Parses event_date (string -> date)
-    - Parses start_time (string -> time) ✅ fixes your 500
+    - Parses start_time (string -> time)
     - Parses end_time (string/time -> naive datetime)
     - Atomic commit with mapping rows
     - Blocks empty mapping
+    - ✅ VALIDATES activity_type_ids exist (prevents wrong IDs like 5,15)
+    - ✅ Sync mapping (delete old + insert new) for safety
     """
 
     # Debug
@@ -640,7 +653,7 @@ async def create_event(db: AsyncSession, payload):
         raise HTTPException(status_code=422, detail="event_date is required and must be a valid date")
 
     # ─────────────────────────────────────────────────────────────
-    # Parse start_time  ✅ CRITICAL FIX
+    # Parse start_time
     # ─────────────────────────────────────────────────────────────
     start_time_raw = (
         getattr(payload, "start_time", None)
@@ -677,14 +690,13 @@ async def create_event(db: AsyncSession, payload):
         required_photos=int(getattr(payload, "required_photos", 3) or 3),
         is_active=True,
         event_date=event_date,
-        start_time=start_time,   # ✅ time object, not string
-        end_time=end_time_dt,    # ✅ naive datetime for DB
+        start_time=start_time,
+        end_time=end_time_dt,
         thumbnail_url=getattr(payload, "thumbnail_url", None),
         venue_name=venue_name,
         maps_url=maps_url,
     )
     db.add(event)
-
     await db.flush()  # ✅ get event.id without committing
 
     # ─────────────────────────────────────────────────────────────
@@ -735,14 +747,32 @@ async def create_event(db: AsyncSession, payload):
             ids = [int(r[0]) for r in rq.all() if r and r[0] is not None]
 
     ids = sorted(set(ids))
-    print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
+    print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS (RAW):", ids)
 
     if not ids:
         await db.rollback()
         raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
 
+    # ✅ Validate IDs exist in ActivityType (prevents wrong IDs like 5,15)
+    exist_q = await db.execute(
+        select(ActivityType.id, ActivityType.name).where(ActivityType.id.in_(ids))
+    )
+    rows = exist_q.all()
+    existing_ids = {int(r[0]) for r in rows}
+    missing = [i for i in ids if i not in existing_ids]
+    if missing:
+        await db.rollback()
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid activity_type_ids: {missing}. UI is sending wrong IDs.",
+        )
+
+    print("✅ Activity types confirmed:", [(int(r[0]), r[1]) for r in rows])
+
+    # ✅ Permanent mapping sync (safety): delete any existing mapping rows then insert
+    await db.execute(delete(EventActivityType).where(EventActivityType.event_id == event.id))
     for at_id in ids:
-        db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
+        db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
 
     await db.commit()
     await db.refresh(event)
