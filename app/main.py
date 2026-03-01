@@ -36,8 +36,11 @@ from app.routes.activity_types import router as activity_types_router
 from app.routes.public_verify import router as public_verify_router
 from app.routes.student_certificates import router as student_certificates_router
 
-# ✅ NEW: Admin Dashboard routes (for backend-powered dashboard)
+# ✅ NEW: Admin Dashboard routes (EventSubmission + Certificate based)
 from app.routes.admin_dashboard import router as admin_dashboard_router
+
+# ✅ NEW: Admin Certificates routes (list, student progress, export, presigned download)
+from app.routes.admin_certificates import router as admin_certificates_router
 
 
 # ───────────────── APP INIT ─────────────────
@@ -71,7 +74,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ───────────────── CORS CONFIG ─────────────────
-
 default_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -132,12 +134,19 @@ app.include_router(student_certificates_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(face_router, prefix="/api")
 
-# ✅ NEW: dashboard endpoints:
+# ✅ Dashboard endpoints:
 # /api/admin/dashboard/stats
 # /api/admin/dashboard/category-progress
 # /api/admin/dashboard/student-progress
 # /api/admin/dashboard/recent-submissions
 app.include_router(admin_dashboard_router, prefix="/api")
+
+# ✅ Certificates endpoints:
+# /api/admin/certificates
+# /api/admin/certificates/student-progress
+# /api/admin/certificates/export
+# /api/admin/certificates/{id}/download-url
+app.include_router(admin_certificates_router, prefix="/api")
 
 
 # ───────────────── HEALTH ─────────────────
