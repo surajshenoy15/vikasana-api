@@ -488,7 +488,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
     q = await db.execute(
         select(Certificate, ActivityType.name)
-        .join(ActivityType, ActivityType.id == Certificate.activity_type_id)
+        .outerjoin(ActivityType, ActivityType.id == Certificate.activity_type_id)  # ✅ changed
         .where(
             Certificate.student_id == student_id,
             Certificate.event_id == event_id,
@@ -498,7 +498,6 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
     )
 
     rows = q.all()
-
     out = []
     for cert, at_name in rows:
         pdf_url = None
@@ -515,7 +514,7 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
             "event_id": cert.event_id,
             "submission_id": cert.submission_id,
             "activity_type_id": cert.activity_type_id,
-            "activity_type_name": at_name,  # ✅ now UI shows proper name
+            "activity_type_name": at_name or f"Activity Type #{cert.activity_type_id}",  # ✅ safe fallback
             "pdf_url": pdf_url,
         })
     return out
