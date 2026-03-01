@@ -1,6 +1,10 @@
 # app/controllers/activity_photos_controller.py
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
+from typing import Optional, Tuple
+
 from fastapi import HTTPException
 from sqlalchemy import select, and_
 from sqlalchemy.exc import IntegrityError
@@ -33,9 +37,9 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 async def _strict_geofence_check(
     db: AsyncSession,
     session: ActivitySession,
-    lat: float | None,
-    lng: float | None,
-) -> tuple[float | None, bool, str | None]:
+    lat: Optional[float],
+    lng: Optional[float],
+) -> Tuple[Optional[float], bool, Optional[str]]:
     """
     STRICT POLICY:
     - If ActivityType has target_lat/target_lng => enforce radius_m
@@ -44,10 +48,11 @@ async def _strict_geofence_check(
 
     Returns (distance_m, is_in_geofence, geo_flag_reason)
     """
+    # activity type must exist for geofence policy
     at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
     at = at_res.scalar_one_or_none()
 
-    # If no activity type found, don't geofence here (shouldn't happen)
+    # If no activity type found, allow (shouldn't happen)
     if not at:
         return None, True, None
 
@@ -75,7 +80,7 @@ async def _strict_geofence_check(
             detail=f"Outside allowed area. You are ~{int(distance_m)}m away. Allowed radius is {radius_m}m.",
         )
 
-    return distance_m, True, None
+    return float(distance_m), True, None
 
 
 async def add_activity_photo(
@@ -84,10 +89,14 @@ async def add_activity_photo(
     student_id: int,
     seq_no: int,
     image_url: str,
-    lat: float,
-    lng: float,
-    captured_at: datetime | None = None,
-    sha256: str | None = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+    captured_at: Optional[datetime] = None,
+    sha256: Optional[str] = None,
+    # ✅ NEW: accept these so callers can pass without TypeError
+    distance_m: Optional[float] = None,
+    is_in_geofence: Optional[bool] = None,
+    geo_flag_reason: Optional[str] = None,
 ):
     """
     Adds (or updates) a photo row for a session.
@@ -95,6 +104,11 @@ async def add_activity_photo(
     ✅ STRICT geofence enforcement:
     - If activity_type has target location => upload allowed ONLY within radius_m (default 500m)
     - If GPS missing => reject
+    - If outside => reject
+
+    NOTE:
+    - distance_m / is_in_geofence / geo_flag_reason may be passed by caller.
+      If not passed, this function computes them.
     """
 
     # 1) Validate session belongs to student
@@ -117,7 +131,7 @@ async def add_activity_photo(
             detail=f"Cannot upload photos when session status is {status_val}",
         )
 
-    # 3) Validate seq_no vs required_photos ONLY if you truly use event_id
+    # 3) Validate seq_no vs required_photos ONLY if session truly uses event_id
     if getattr(session, "event_id", None):
         rq = await db.execute(select(Event.required_photos).where(Event.id == session.event_id))
         required_photos = rq.scalar_one_or_none()
@@ -155,8 +169,21 @@ async def add_activity_photo(
         dup = await db.execute(q)
         is_duplicate = dup.scalar_one_or_none() is not None
 
-    # ✅ 6) STRICT Geofence check BEFORE saving
-    distance_m, is_in_geofence, geo_flag_reason = await _strict_geofence_check(db, session, lat, lng)
+    # ✅ 6) STRICT Geofence check BEFORE saving (unless caller already computed)
+    # We still enforce strict policy (it will raise if missing/outside)
+    if distance_m is None or is_in_geofence is None:
+        distance_m2, ok2, reason2 = await _strict_geofence_check(db, session, lat, lng)
+        if distance_m is None:
+            distance_m = distance_m2
+        if is_in_geofence is None:
+            is_in_geofence = ok2
+        if geo_flag_reason is None:
+            geo_flag_reason = reason2
+
+    # Column existence guards (in case migrations differ across envs)
+    has_dist = hasattr(ActivityPhoto, "distance_m")
+    has_in = hasattr(ActivityPhoto, "is_in_geofence")
+    has_reason = hasattr(ActivityPhoto, "geo_flag_reason")
 
     try:
         if existing:
@@ -165,13 +192,17 @@ async def add_activity_photo(
             existing.lng = float(lng) if lng is not None else None
             existing.captured_at = captured_at
             existing.student_id = student_id
+
             if sha256 is not None and has_sha_col:
                 existing.sha256 = sha256
 
-            # ✅ store geofence fields
-            existing.distance_m = distance_m
-            existing.is_in_geofence = bool(is_in_geofence)
-            existing.geo_flag_reason = geo_flag_reason
+            # ✅ store geofence fields if columns exist
+            if has_dist:
+                existing.distance_m = distance_m
+            if has_in:
+                existing.is_in_geofence = bool(is_in_geofence) if is_in_geofence is not None else True
+            if has_reason:
+                existing.geo_flag_reason = geo_flag_reason
 
             await db.commit()
             await db.refresh(existing)
@@ -186,12 +217,17 @@ async def add_activity_photo(
                 lat=float(lat) if lat is not None else None,
                 lng=float(lng) if lng is not None else None,
                 captured_at=captured_at,
-                distance_m=distance_m,
-                is_in_geofence=bool(is_in_geofence),
-                geo_flag_reason=geo_flag_reason,
             )
             if sha256 is not None and has_sha_col:
                 payload["sha256"] = sha256
+
+            # ✅ include geofence fields only if columns exist
+            if has_dist:
+                payload["distance_m"] = distance_m
+            if has_in:
+                payload["is_in_geofence"] = bool(is_in_geofence) if is_in_geofence is not None else True
+            if has_reason:
+                payload["geo_flag_reason"] = geo_flag_reason
 
             photo = ActivityPhoto(**payload)
             db.add(photo)
@@ -214,3 +250,10 @@ async def add_activity_photo(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=409, detail="Photo for this seq_no already exists")
+    except HTTPException:
+        # geofence errors etc.
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save photo: {e}")
