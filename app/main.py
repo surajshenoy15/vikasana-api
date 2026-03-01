@@ -36,10 +36,8 @@ from app.routes.activity_types import router as activity_types_router
 from app.routes.public_verify import router as public_verify_router
 from app.routes.student_certificates import router as student_certificates_router
 
-# ✅ NEW: Admin Dashboard routes (EventSubmission + Certificate based)
+# ✅ Admin dashboard + certificates
 from app.routes.admin_dashboard import router as admin_dashboard_router
-
-# ✅ NEW: Admin Certificates routes (list, student progress, export, presigned download)
 from app.routes.admin_certificates import router as admin_certificates_router
 
 
@@ -79,17 +77,22 @@ default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
+
     "http://31.97.230.171",
     "http://31.97.230.171:3000",
     "http://31.97.230.171:5173",
     "https://31.97.230.171",
     "https://31.97.230.171:3000",
     "https://31.97.230.171:5173",
+
+    # ✅ Vercel Admin domain
+    "https://vikasana-admin.vercel.app",
 ]
 
 origins = set(default_origins)
 if settings.origins_list:
     origins.update([o.strip() for o in settings.origins_list if o and o.strip()])
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -134,18 +137,10 @@ app.include_router(student_certificates_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(face_router, prefix="/api")
 
-# ✅ Dashboard endpoints:
-# /api/admin/dashboard/stats
-# /api/admin/dashboard/category-progress
-# /api/admin/dashboard/student-progress
-# /api/admin/dashboard/recent-submissions
+# ✅ Dashboard endpoints
 app.include_router(admin_dashboard_router, prefix="/api")
 
-# ✅ Certificates endpoints:
-# /api/admin/certificates
-# /api/admin/certificates/student-progress
-# /api/admin/certificates/export
-# /api/admin/certificates/{id}/download-url
+# ✅ Admin certificates endpoints
 app.include_router(admin_certificates_router, prefix="/api")
 
 
