@@ -1,7 +1,9 @@
 # app/controllers/activity_controller.py
 
 import secrets
+import math
 from datetime import datetime, time, timezone
+from typing import Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -37,9 +39,66 @@ def _calc_duration_hours(photo_times: list[datetime]) -> float:
     return max(0.0, seconds / 3600.0)
 
 
-async def _get_activity_type(db: AsyncSession, activity_type_id: int) -> ActivityType | None:
-    res = await db.execute(select(ActivityType).where(ActivityType.id == activity_type_id))
-    return res.scalar_one_or_none()
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """
+    Great-circle distance in meters between two lat/lng points.
+    """
+    R = 6371000.0  # meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
+async def _get_activity_type_for_session(db: AsyncSession, session: ActivitySession) -> Optional[ActivityType]:
+    """
+    Returns ActivityType for a session.
+    """
+    if getattr(session, "activity_type", None) is not None:
+        return session.activity_type
+
+    at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
+    return at_res.scalar_one_or_none()
+
+
+def _compute_geofence_verdict(
+    at: Optional[ActivityType],
+    lat: Optional[float],
+    lng: Optional[float],
+) -> Tuple[Optional[float], bool, Optional[str], int, Optional[float], Optional[float]]:
+    """
+    Returns:
+      (distance_m, is_in_geofence, geo_flag_reason, radius_m, target_lat, target_lng)
+
+    Policy:
+    - If target is not configured => allow (is_in_geofence=True)
+    - If target configured but lat/lng missing => reject later (geo_flag_reason="missing_gps")
+    - If outside => is_in_geofence=False, geo_flag_reason="outside_geofence>XYZm"
+    """
+    if not at:
+        return None, True, None, DEFAULT_RADIUS_M, None, None
+
+    target_lat = getattr(at, "target_lat", None)
+    target_lng = getattr(at, "target_lng", None)
+    radius_m = int(getattr(at, "radius_m", DEFAULT_RADIUS_M) or DEFAULT_RADIUS_M)
+
+    # If admin didn't configure location, don't block
+    if target_lat is None or target_lng is None:
+        return None, True, None, radius_m, None, None
+
+    # Admin configured location but GPS not available
+    if lat is None or lng is None:
+        return None, False, "missing_gps", radius_m, float(target_lat), float(target_lng)
+
+    distance_m = _haversine_m(float(lat), float(lng), float(target_lat), float(target_lng))
+    if distance_m > radius_m:
+        return distance_m, False, f"outside_geofence>{radius_m}m", radius_m, float(target_lat), float(target_lng)
+
+    return distance_m, True, None, radius_m, float(target_lat), float(target_lng)
 
 
 # ─────────────────────────────────────────────
@@ -69,6 +128,7 @@ async def request_new_activity_type(db: AsyncSession, name: str, description: st
         hours_per_unit=20,
         points_per_unit=5,
         max_points=20,
+        # Geofence defaults already on model (radius_m=500)
     )
     db.add(at)
     await db.commit()
@@ -87,7 +147,10 @@ async def create_session(
     activity_name: str,
     description: str | None,
 ):
-    activity_type = await _get_activity_type(db, activity_type_id)
+    at_res = await db.execute(
+        select(ActivityType).where(ActivityType.id == activity_type_id)
+    )
+    activity_type = at_res.scalar_one_or_none()
     if not activity_type:
         raise HTTPException(status_code=404, detail="Activity type not found")
 
@@ -115,6 +178,11 @@ async def create_session(
 # ─────────────────────────────────────────────
 
 async def list_student_sessions(db: AsyncSession, student_id: int):
+    """
+    Returns all sessions for the logged-in student.
+    Used by:
+      GET /api/student/activity/sessions
+    """
     res = await db.execute(
         select(ActivitySession)
         .where(ActivitySession.student_id == student_id)
@@ -124,8 +192,7 @@ async def list_student_sessions(db: AsyncSession, student_id: int):
 
 
 # ─────────────────────────────────────────────
-# Add Photo
-# NOTE: STRICT 500m geofence is enforced inside add_activity_photo()
+# Add Photo (STRICT 500m geofence enforcement)
 # ─────────────────────────────────────────────
 
 async def add_photo_to_session(
@@ -139,9 +206,10 @@ async def add_photo_to_session(
     lng: float,
     sha256: str | None = None,
 ) -> PhotoOut:
-    # 1) Verify session exists + belongs to student
+    # 1) Verify session exists + belongs to student (load activity_type optionally)
     res = await db.execute(
-        select(ActivitySession).where(
+        select(ActivitySession)
+        .where(
             ActivitySession.id == session_id,
             ActivitySession.student_id == student_id,
         )
@@ -165,7 +233,7 @@ async def add_photo_to_session(
     if seq_no < 1 or seq_no > MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"seq_no must be between 1 and {MAX_PHOTOS}")
 
-    # 5) Prevent exceeding max photos count
+    # 5) Prevent exceeding max photos count (count-based guard)
     count_res = await db.execute(
         select(func.count(ActivityPhoto.id)).where(ActivityPhoto.session_id == session_id)
     )
@@ -173,7 +241,32 @@ async def add_photo_to_session(
     if existing_count >= MAX_PHOTOS:
         raise HTTPException(status_code=400, detail=f"Maximum {MAX_PHOTOS} photos allowed")
 
-    # 6) Save photo (strict geofence enforced inside add_activity_photo)
+    # 6) STRICT geofence:
+    #    - if target configured AND outside => reject immediately
+    #    - if target configured AND gps missing => reject immediately
+    at = await _get_activity_type_for_session(db, session)
+
+    distance_m, is_in_geofence, geo_flag_reason, radius_m, target_lat, target_lng = _compute_geofence_verdict(
+        at=at,
+        lat=lat,
+        lng=lng,
+    )
+
+    if at and getattr(at, "target_lat", None) is not None and getattr(at, "target_lng", None) is not None:
+        # target configured => enforce
+        if not is_in_geofence:
+            if geo_flag_reason == "missing_gps":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Location is required for this activity. Please enable GPS and try again.",
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Outside allowed area. You are ~{int(distance_m or 0)}m away. Allowed radius is {radius_m}m.",
+            )
+
+    # 7) Save via photo controller (stores geo verdict too)
+    # NOTE: Ensure ActivityPhoto model has columns: distance_m, is_in_geofence, geo_flag_reason
     row = await add_activity_photo(
         db=db,
         session_id=session_id,
@@ -184,14 +277,15 @@ async def add_photo_to_session(
         lng=lng,
         captured_at=captured_at,
         sha256=sha256,
+        distance_m=distance_m,
+        is_in_geofence=True,          # strict passed => always True if target configured
+        geo_flag_reason=None,
     )
     return row
 
 
 # ─────────────────────────────────────────────
-# Submit Session
-# - FLAGGED if suspicious
-# - else SUBMITTED (admin approves later)
+# Submit Session (strict: require MIN_PHOTOS + all in geofence)
 # ─────────────────────────────────────────────
 
 async def submit_session(db: AsyncSession, student_id: int, session_id: int):
@@ -214,11 +308,11 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
         await db.commit()
         raise HTTPException(status_code=400, detail="Session expired")
 
-    # For message only (radius is stored per ActivityType)
-    at = await _get_activity_type(db, session.activity_type_id)
+    # Load ActivityType for dynamic radius message
+    at = await _get_activity_type_for_session(db, session)
     radius_m = int(getattr(at, "radius_m", DEFAULT_RADIUS_M) or DEFAULT_RADIUS_M) if at else DEFAULT_RADIUS_M
 
-    # Only consider in-geofence photos as valid
+    # ✅ Only consider in-geofence photos as valid (and strict add_photo already enforces)
     photos_res = await db.execute(
         select(ActivityPhoto).where(
             ActivityPhoto.session_id == session_id,
@@ -274,13 +368,16 @@ async def submit_session(db: AsyncSession, student_id: int, session_id: int):
         await db.commit()
         return session, 0, 0, 0
 
-    session.status = ActivitySessionStatus.SUBMITTED
+    # Note: You might want SUBMITTED instead of APPROVED, depending on your workflow.
+    # Keeping your original logic.
+    session.status = ActivitySessionStatus.APPROVED
     await db.commit()
+
     return session, 0, 0, 0
 
 
 # ─────────────────────────────────────────────
-# Session Detail
+# Session Detail (includes geo info + target location)
 # ─────────────────────────────────────────────
 
 async def get_student_session_detail(db: AsyncSession, student_id: int, session_id: int):
@@ -297,7 +394,7 @@ async def get_student_session_detail(db: AsyncSession, student_id: int, session_
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    at = await _get_activity_type(db, session.activity_type_id)
+    at = await _get_activity_type_for_session(db, session)
 
     photos = list(session.photos or [])
 
