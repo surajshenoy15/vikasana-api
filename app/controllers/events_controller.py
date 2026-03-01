@@ -357,14 +357,34 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # ✅ STRICT: always use event mapped activity types
+    # ✅ 1) Try mapped activity types first
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     activity_type_ids = sorted(set(int(x) for x in activity_type_ids if x is not None))
 
+    # ✅ 2) Fallback infer from APPROVED sessions inside event window (for old events)
+    if not activity_type_ids:
+        start_utc, end_utc = _event_window_utc(event)
+        aq = await db.execute(
+            select(func.distinct(ActivitySession.activity_type_id)).where(
+                ActivitySession.status == ActivitySessionStatus.APPROVED,
+                ActivitySession.started_at >= start_utc,
+                ActivitySession.started_at <= end_utc,
+                ActivitySession.activity_type_id.is_not(None),
+            )
+        )
+        activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
+        activity_type_ids = sorted(set(activity_type_ids))
+
+        # ✅ Optional: auto-save inferred mapping so it won’t fail next time
+        for at_id in activity_type_ids:
+            db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
+        await db.commit()
+
+    # ✅ Still nothing => clean message
     if not activity_type_ids:
         raise HTTPException(
             status_code=400,
-            detail="No activity types configured for this event. Please select activity types while creating the event.",
+            detail="No activity types found for this event. Select activity types while creating the event OR ensure approved sessions exist inside event window.",
         )
 
     start_utc, end_utc = _event_window_utc(event)
@@ -400,7 +420,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = (getattr(student, "usn", None) or "").strip()
 
         for at_id in activity_type_ids:
-            # ✅ avoid duplicates
+            # avoid duplicates
             ex = await db.execute(
                 select(Certificate.id).where(
                     Certificate.submission_id == sub.id,
@@ -410,7 +430,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # ✅ hours for this activity type within event window (optional info)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -422,23 +441,18 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             )
             hours = float(hrs_q.scalar() or 0.0)
 
-            # ✅ DO NOT SKIP when hours = 0
             at = at_by_id.get(at_id)
             activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
 
-            # ✅ points calc (safe even if hours = 0)
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
                 hpu = getattr(at, "hours_per_unit", None)
-
                 if ppu is not None and hpu and hours > 0:
                     try:
                         points_awarded = int(round((hours / float(hpu)) * float(ppu)))
                     except Exception:
                         points_awarded = 0
-                else:
-                    points_awarded = 0
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -454,7 +468,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             await db.flush()
 
             sig = sign_cert(cert.certificate_no)
-
             verify_url = (
                 f"{settings.PUBLIC_BASE_URL}/api/public/certificates/verify"
                 f"?cert_id={quote(cert.certificate_no)}&sig={quote(sig)}"
@@ -474,7 +487,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
             object_key = upload_certificate_pdf_bytes(cert.id, pdf_bytes)
             cert.pdf_path = object_key
-
             issued += 1
 
     await db.commit()
