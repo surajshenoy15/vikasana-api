@@ -18,13 +18,54 @@ class EventCreateIn(BaseModel):
     end_time: Optional[time] = None
     thumbnail_url: Optional[str] = None
 
-    # ✅ NEW (Location)
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
 
-    # ✅ NEW (Admin selects these activity types for the event)
-    # Example: [1, 5] => Energy conservation + Rural product marketing
-    activity_type_ids: List[int] = Field(default_factory=list)
+    # ✅ accept multiple frontend field names
+    activity_type_ids: List[int] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "activity_type_ids",
+            "activityTypeIds",
+            "activityTypes",
+            "activity_types",
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_activity_ids(cls, data: Any):
+        if not isinstance(data, dict):
+            return data
+
+        raw = (
+            data.get("activity_type_ids")
+            or data.get("activityTypeIds")
+            or data.get("activityTypes")
+            or data.get("activity_types")
+            or []
+        )
+
+        # supports [{id: 6}, {id: 7}]
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            raw = [x.get("id") for x in raw]
+
+        # supports "6,7"
+        if isinstance(raw, str):
+            raw = [x.strip() for x in raw.split(",") if x.strip()]
+
+        ids: List[int] = []
+        if isinstance(raw, list):
+            for x in raw:
+                try:
+                    v = int(x)
+                    if v > 0:
+                        ids.append(v)
+                except Exception:
+                    pass
+
+        data["activity_type_ids"] = sorted(set(ids))
+        return data
 
 
 class EventOut(BaseModel):
