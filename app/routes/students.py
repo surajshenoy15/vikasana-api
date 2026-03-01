@@ -1,3 +1,8 @@
+# app/routes/students.py
+# ✅ Fully updated to return REAL counts:
+# - activities_count = COUNT(EventSubmission)  (your "activities" are event submissions)
+# - certificates_count = COUNT(Certificate)
+
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
@@ -8,7 +13,10 @@ from app.core.dependencies import get_current_faculty, get_current_admin, get_cu
 from app.models.faculty import Faculty
 from app.models.admin import Admin
 from app.models.student import Student, StudentType
-from app.models.activity_session import ActivitySession  # ✅ for activities count
+
+# ✅ REAL sources for counts (matches your Certificate model)
+from app.models.events import EventSubmission
+from app.models.certificate import Certificate
 
 from app.schemas.student import StudentCreate, StudentOut, BulkUploadResult
 from app.controllers.student_controller import create_student, create_students_from_csv
@@ -20,7 +28,6 @@ from typing import Optional
 # ─────────────────────────────────────────────────────────────
 # SCHEMA (PATCH) - matches your Student model (NO is_active field)
 # ─────────────────────────────────────────────────────────────
-
 class StudentUpdate(BaseModel):
     college: Optional[str] = None
     name: Optional[str] = None
@@ -44,7 +51,6 @@ def _normalize_student_type(v: str | None) -> str | None:
 # ─────────────────────────────────────────────────────────────
 # FACULTY ROUTES
 # ─────────────────────────────────────────────────────────────
-
 faculty_router = APIRouter(prefix="/faculty/students", tags=["Faculty - Students"])
 
 
@@ -60,12 +66,23 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
+    # ✅ activities = event submissions
     activities_sq = (
         select(
-            ActivitySession.student_id.label("student_id"),
-            func.count(ActivitySession.id).label("activities_count"),
+            EventSubmission.student_id.label("student_id"),
+            func.count(EventSubmission.id).label("activities_count"),
         )
-        .group_by(ActivitySession.student_id)
+        .group_by(EventSubmission.student_id)
+        .subquery()
+    )
+
+    # ✅ certificates = certificates table
+    certs_sq = (
+        select(
+            Certificate.student_id.label("student_id"),
+            func.count(Certificate.id).label("certificates_count"),
+        )
+        .group_by(Certificate.student_id)
         .subquery()
     )
 
@@ -73,9 +90,11 @@ async def list_students(
         select(
             Student,
             func.coalesce(activities_sq.c.activities_count, 0).label("activities_count"),
+            func.coalesce(certs_sq.c.certificates_count, 0).label("certificates_count"),
         )
         .options(selectinload(Student.created_by_faculty))
         .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
+        .outerjoin(certs_sq, certs_sq.c.student_id == Student.id)
         .where(Student.college == current_faculty.college)
     )
 
@@ -120,8 +139,9 @@ async def list_students(
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
             activities_count=int(activities_count or 0),
+            certificates_count=int(certificates_count or 0),
         )
-        for (s, activities_count) in rows
+        for (s, activities_count, certificates_count) in rows
     ]
 
 
@@ -132,7 +152,12 @@ async def add_student_manual(
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
     try:
-        s = await create_student(db, payload, current_faculty=current_faculty)
+        s = await create_student(
+            db,
+            payload,
+            faculty_college=current_faculty.college,
+            faculty_id=current_faculty.id,
+        )
         return StudentOut(
             id=s.id,
             name=s.name,
@@ -145,6 +170,7 @@ async def add_student_manual(
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
             activities_count=0,
+            certificates_count=0,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -182,7 +208,6 @@ async def add_students_bulk(
 # ─────────────────────────────────────────────────────────────
 # ADMIN ROUTES (LIST + GET BY ID + PATCH)
 # ─────────────────────────────────────────────────────────────
-
 admin_router = APIRouter(prefix="/admin/students", tags=["Admin - Students"])
 
 
@@ -201,10 +226,19 @@ async def list_students_admin(
 ):
     activities_sq = (
         select(
-            ActivitySession.student_id.label("student_id"),
-            func.count(ActivitySession.id).label("activities_count"),
+            EventSubmission.student_id.label("student_id"),
+            func.count(EventSubmission.id).label("activities_count"),
         )
-        .group_by(ActivitySession.student_id)
+        .group_by(EventSubmission.student_id)
+        .subquery()
+    )
+
+    certs_sq = (
+        select(
+            Certificate.student_id.label("student_id"),
+            func.count(Certificate.id).label("certificates_count"),
+        )
+        .group_by(Certificate.student_id)
         .subquery()
     )
 
@@ -212,9 +246,11 @@ async def list_students_admin(
         select(
             Student,
             func.coalesce(activities_sq.c.activities_count, 0).label("activities_count"),
+            func.coalesce(certs_sq.c.certificates_count, 0).label("certificates_count"),
         )
         .options(selectinload(Student.created_by_faculty))
         .outerjoin(activities_sq, activities_sq.c.student_id == Student.id)
+        .outerjoin(certs_sq, certs_sq.c.student_id == Student.id)
     )
 
     if college and college.strip():
@@ -261,8 +297,9 @@ async def list_students_admin(
             college=s.college,
             faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
             activities_count=int(activities_count or 0),
+            certificates_count=int(certificates_count or 0),
         )
-        for (s, activities_count) in rows
+        for (s, activities_count, certificates_count) in rows
     ]
 
 
@@ -273,8 +310,14 @@ async def get_student_admin(
     current_admin: Admin = Depends(get_current_admin),
 ):
     activities_count_sq = (
-        select(func.count(ActivitySession.id))
-        .where(ActivitySession.student_id == student_id)
+        select(func.count(EventSubmission.id))
+        .where(EventSubmission.student_id == student_id)
+        .scalar_subquery()
+    )
+
+    certificates_count_sq = (
+        select(func.count(Certificate.id))
+        .where(Certificate.student_id == student_id)
         .scalar_subquery()
     )
 
@@ -282,6 +325,7 @@ async def get_student_admin(
         select(
             Student,
             func.coalesce(activities_count_sq, 0).label("activities_count"),
+            func.coalesce(certificates_count_sq, 0).label("certificates_count"),
         )
         .options(selectinload(Student.created_by_faculty))
         .where(Student.id == student_id)
@@ -292,7 +336,7 @@ async def get_student_admin(
     if not row:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    s, activities_count = row
+    s, activities_count, certificates_count = row
 
     return StudentOut(
         id=s.id,
@@ -306,6 +350,7 @@ async def get_student_admin(
         college=s.college,
         faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
         activities_count=int(activities_count or 0),
+        certificates_count=int(certificates_count or 0),
     )
 
 
@@ -366,9 +411,14 @@ async def update_student_admin(
     await db.refresh(s)
 
     act_res = await db.execute(
-        select(func.count(ActivitySession.id)).where(ActivitySession.student_id == s.id)
+        select(func.count(EventSubmission.id)).where(EventSubmission.student_id == s.id)
     )
     activities_count = act_res.scalar() or 0
+
+    cert_res = await db.execute(
+        select(func.count(Certificate.id)).where(Certificate.student_id == s.id)
+    )
+    certificates_count = cert_res.scalar() or 0
 
     return StudentOut(
         id=s.id,
@@ -382,13 +432,13 @@ async def update_student_admin(
         college=s.college,
         faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
         activities_count=int(activities_count),
+        certificates_count=int(certificates_count),
     )
 
 
 # ─────────────────────────────────────────────────────────────
 # STUDENT ROUTES (PROFILE)
 # ─────────────────────────────────────────────────────────────
-
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
 
 

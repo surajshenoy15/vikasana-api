@@ -1,7 +1,12 @@
+# app/controllers/student_controller.py
+# ✅ Fully updated controller (safe + consistent with your updated routes)
+# - Fixes the wrong call pattern you had in routes (current_faculty=...) by keeping signature as (faculty_college, faculty_id)
+# - Adds small robustness: safe email normalization, handles missing email header properly, avoids "row.get('')" edge
+
 import os
 import csv
 import io
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +57,7 @@ async def create_student(
     payload: StudentCreate,
     *,
     faculty_college: str,
-    faculty_id: int | None = None,  # ✅ NEW (mentor)
+    faculty_id: int | None = None,  # ✅ mentor id
 ) -> Student:
     faculty_college = (faculty_college or "").strip()
     if not faculty_college:
@@ -61,7 +66,7 @@ async def create_student(
     usn = payload.usn.strip()
     email = str(payload.email).strip().lower() if payload.email else None
 
-    # ✅ duplicate by USN/email within same college (single query)
+    # ✅ Duplicate check within same college (USN or Email)
     dup_stmt = select(Student).where(
         Student.college == faculty_college,
         or_(
@@ -71,7 +76,6 @@ async def create_student(
     )
     existing = (await db.execute(dup_stmt)).scalar_one_or_none()
     if existing:
-        # make message clearer
         if existing.usn == usn:
             raise ValueError(f"Duplicate USN in this college: {usn}")
         raise ValueError(f"Duplicate Email in this college: {email}")
@@ -80,32 +84,36 @@ async def create_student(
     required_points = _required_points_for_type(stype)
 
     s = Student(
-        college=faculty_college,  # ✅ enforce from faculty, not from client
+        college=faculty_college,  # ✅ enforced
         name=payload.name.strip(),
         usn=usn,
         branch=payload.branch.strip(),
         email=email,
         student_type=stype,
 
-        # ✅ NEW FIELDS (Activity Tracker)
+        # ✅ Activity Tracker fields
         required_total_points=required_points,
         total_points_earned=0,
 
         passout_year=payload.passout_year,
         admitted_year=payload.admitted_year,
 
-        # ✅ THIS enables Faculty Mentor name in UI
+        # ✅ Mentor
         created_by_faculty_id=faculty_id,
     )
     db.add(s)
     await db.commit()
     await db.refresh(s)
 
-    # ✅ Send welcome email (non-blocking failure)
+    # ✅ Welcome email (non-blocking)
     if s.email:
         try:
             app_url = os.getenv("STUDENT_APP_DOWNLOAD_URL", "https://vikasana.org/app")
-            await send_student_welcome_email(to_email=s.email, to_name=s.name, app_download_url=app_url)
+            await send_student_welcome_email(
+                to_email=s.email,
+                to_name=s.name,
+                app_download_url=app_url,
+            )
         except Exception as e:
             print(f"[WARN] Student welcome email not sent for {s.email}: {e}")
 
@@ -118,7 +126,7 @@ async def create_students_from_csv(
     skip_duplicates: bool = True,
     *,
     faculty_college: str,
-    faculty_id: int | None = None,  # ✅ NEW (mentor)
+    faculty_id: int | None = None,  # ✅ mentor id
 ) -> Tuple[int, int, int, int, List[str]]:
     """
     CSV headers expected (required):
@@ -144,7 +152,6 @@ async def create_students_from_csv(
         text = csv_bytes.decode("utf-8", errors="replace")
 
     reader = csv.DictReader(io.StringIO(text))
-
     if not reader.fieldnames:
         return (0, 0, 0, 0, ["CSV has no headers. Required: name, usn, branch, passout_year, admitted_year"])
 
@@ -158,14 +165,15 @@ async def create_students_from_csv(
     rows = list(reader)
     total_rows = len(rows)
 
-    # ✅ preload existing USNs/emails for this college (performance + correct)
-    existing_rows = (await db.execute(select(Student.usn, Student.email).where(Student.college == faculty_college))).all()
+    # ✅ preload existing USNs/emails for this college
+    existing_rows = (
+        await db.execute(select(Student.usn, Student.email).where(Student.college == faculty_college))
+    ).all()
     existing_usns = {r[0] for r in existing_rows if r[0]}
     existing_emails = {str(r[1]).lower() for r in existing_rows if r[1]}
 
     for idx, row in enumerate(rows, start=2):
         try:
-            # Read required fields using normalized headers
             name = _clean(row.get(field_map["name"], ""))
             usn = _clean(row.get(field_map["usn"], ""))
             branch = _clean(row.get(field_map["branch"], ""))
@@ -173,14 +181,19 @@ async def create_students_from_csv(
             passout_year = int(_clean(row.get(field_map["passout_year"], "")))
             admitted_year = int(_clean(row.get(field_map["admitted_year"], "")))
 
-            # Optional
-            email = _clean(row.get(field_map.get("email", ""), "")).lower() if "email" in headers else ""
-            stype_raw = _clean(row.get(field_map.get("student_type", ""), "")).upper() if "student_type" in headers else ""
+            # Optional fields
+            email = ""
+            if "email" in headers:
+                email = _clean(row.get(field_map["email"], "")).lower()
+
+            stype_raw = ""
+            if "student_type" in headers:
+                stype_raw = _clean(row.get(field_map["student_type"], "")).upper()
 
             if not name or not usn or not branch:
                 raise ValueError("name/usn/branch cannot be empty")
 
-            # ✅ duplicates within same college (fast set-check)
+            # ✅ duplicates within same college
             dup = (usn in existing_usns) or (email and email in existing_emails)
             if dup:
                 if skip_duplicates:
@@ -192,27 +205,27 @@ async def create_students_from_csv(
             required_points = _required_points_for_type(stype)
 
             s = Student(
-                college=faculty_college,  # ✅ enforce from faculty
+                college=faculty_college,  # ✅ enforced
                 name=name,
                 usn=usn,
                 branch=branch,
                 email=email or None,
                 student_type=stype,
 
-                # ✅ NEW FIELDS (Activity Tracker)
+                # ✅ Activity Tracker fields
                 required_total_points=required_points,
                 total_points_earned=0,
 
                 passout_year=passout_year,
                 admitted_year=admitted_year,
 
-                # ✅ THIS enables Faculty Mentor name in UI
+                # ✅ Mentor
                 created_by_faculty_id=faculty_id,
             )
             db.add(s)
             inserted += 1
 
-            # update sets so later rows detect duplicates too
+            # update sets
             existing_usns.add(usn)
             if email:
                 existing_emails.add(email)

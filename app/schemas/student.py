@@ -33,9 +33,13 @@ class StudentOut(BaseModel):
     passout_year: int
     admitted_year: int
 
-    # ✅ NEW (for UI columns)
+    # ✅ UI fields
     college: str | None = None
     faculty_mentor_name: str | None = None
+
+    # ✅ ADD THESE TWO
+    activities_count: int = 0
+    certificates_count: int = 0
 
     model_config = {"from_attributes": True}
 
