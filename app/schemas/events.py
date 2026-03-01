@@ -1,33 +1,46 @@
 # =========================================================
-# app/schemas/events.py  ✅ FULL UPDATED (WITH LOCATION + ACTIVITY TYPES)
+# app/schemas/events.py  ✅ FULL UPDATED (CREATE + UPDATE + LOCATION + ACTIVITY TYPES)
 # =========================================================
 
+from __future__ import annotations
 
-from typing import Optional, List
-from datetime import datetime, date, time
-from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Any
-from datetime import date, time
+from datetime import datetime, date, time
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.config import ConfigDict
 
 
-# ------------------ EVENTS ------------------
+# =========================================================
+# ------------------ EVENTS (CREATE / UPDATE / OUT) --------
+# =========================================================
 
 class EventCreateIn(BaseModel):
+    """
+    Used for POST /admin/events
+    Frontend may send activity_type_ids in multiple shapes/keys.
+    """
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     title: str
     description: Optional[str] = None
-    required_photos: int = Field(3, ge=3, le=5)
+
+    required_photos: int = Field(default=3, ge=3, le=5)
+
     event_date: Optional[date] = None
     start_time: Optional[time] = None
     end_time: Optional[time] = None
+
     thumbnail_url: Optional[str] = None
 
+    # ✅ Location fields
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    geo_radius_m: Optional[int] = None
 
-    # ✅ Always end up as List[int]
+    # ✅ Event ↔ ActivityType mapping
     activity_type_ids: List[int] = Field(default_factory=list)
 
     # ✅ Pull ids from alternate frontend keys BEFORE validation
@@ -37,7 +50,6 @@ class EventCreateIn(BaseModel):
         if not isinstance(data, dict):
             return data
 
-        # If frontend sends activityTypeIds / activityTypes / activity_types etc.
         if "activity_type_ids" not in data or not data.get("activity_type_ids"):
             for k in ["activityTypeIds", "activityTypes", "activity_types", "activity_type_id", "activity_list"]:
                 if k in data and data.get(k) is not None:
@@ -56,7 +68,7 @@ class EventCreateIn(BaseModel):
         # "6,7"
         if isinstance(v, str):
             parts = [x.strip() for x in v.split(",") if x.strip()]
-            out = []
+            out: List[int] = []
             for x in parts:
                 try:
                     out.append(int(x))
@@ -70,7 +82,7 @@ class EventCreateIn(BaseModel):
 
         # list of dicts: [{id: 6}, {id: 7}]
         if isinstance(v, list) and v and isinstance(v[0], dict):
-            out = []
+            out: List[int] = []
             for obj in v:
                 try:
                     out.append(int(obj.get("id")))
@@ -80,7 +92,7 @@ class EventCreateIn(BaseModel):
 
         # list of strings/ints: ["6","7"] or [6,7]
         if isinstance(v, list):
-            out = []
+            out: List[int] = []
             for x in v:
                 try:
                     out.append(int(x))
@@ -90,28 +102,117 @@ class EventCreateIn(BaseModel):
 
         return []
 
-class EventOut(BaseModel):
-    id: int
-    title: str
-    description: Optional[str]
-    required_photos: int
-    is_active: bool
+
+class EventUpdateIn(BaseModel):
+    """
+    ✅ Used for PUT/PATCH /admin/events/{id}
+    Fixes 422 by making fields optional and supporting partial updates.
+    """
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    title: Optional[str] = None
+    description: Optional[str] = None
+
+    required_photos: Optional[int] = Field(default=None, ge=3, le=5)
+
     event_date: Optional[date] = None
     start_time: Optional[time] = None
     end_time: Optional[time] = None
+
+    is_active: Optional[bool] = None
     thumbnail_url: Optional[str] = None
 
-    # ✅ NEW (Location)
+    # ✅ Location fields
     venue_name: Optional[str] = None
     maps_url: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    geo_radius_m: Optional[int] = None
 
-    # NOTE:
-    # We don't force EventOut to include activity_type_ids,
-    # because Event table doesn't store it directly (mapping table does).
-    # If you want it in response, we can create a separate EventOutAdmin schema.
+    # ✅ mapping (optional on update)
+    activity_type_ids: Optional[List[int]] = None
 
-    class Config:
-        from_attributes = True
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_activity_keys(cls, data: Any):
+        if not isinstance(data, dict):
+            return data
+
+        # if frontend uses alternate keys, map them in
+        if "activity_type_ids" not in data or data.get("activity_type_ids") is None:
+            for k in ["activityTypeIds", "activityTypes", "activity_types", "activity_type_id", "activity_list"]:
+                if k in data and data.get(k) is not None:
+                    data["activity_type_ids"] = data.get(k)
+                    break
+
+        return data
+
+    @field_validator("activity_type_ids", mode="before")
+    @classmethod
+    def _coerce_activity_type_ids(cls, v: Any):
+        # On update, None means "do not change mapping"
+        if v is None:
+            return None
+
+        # "6,7"
+        if isinstance(v, str):
+            parts = [x.strip() for x in v.split(",") if x.strip()]
+            out: List[int] = []
+            for x in parts:
+                try:
+                    out.append(int(x))
+                except Exception:
+                    pass
+            return out
+
+        # single int
+        if isinstance(v, int):
+            return [v]
+
+        # list of dicts: [{id: 6}, {id: 7}]
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            out: List[int] = []
+            for obj in v:
+                try:
+                    out.append(int(obj.get("id")))
+                except Exception:
+                    pass
+            return out
+
+        # list of strings/ints
+        if isinstance(v, list):
+            out: List[int] = []
+            for x in v:
+                try:
+                    out.append(int(x))
+                except Exception:
+                    pass
+            return out
+
+        return []
+
+
+class EventOut(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    required_photos: int
+    is_active: bool
+
+    event_date: Optional[date] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+
+    thumbnail_url: Optional[str] = None
+
+    # ✅ Location
+    venue_name: Optional[str] = None
+    maps_url: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lng: Optional[float] = None
+    geo_radius_m: Optional[int] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ThumbnailUploadUrlIn(BaseModel):
@@ -124,14 +225,18 @@ class ThumbnailUploadUrlOut(BaseModel):
     public_url: str
 
 
-# ------------------ REGISTRATION ------------------
+# =========================================================
+# ------------------ REGISTRATION -------------------------
+# =========================================================
 
 class RegisterOut(BaseModel):
     submission_id: int
     status: str
 
 
-# ------------------ PHOTOS ------------------
+# =========================================================
+# ------------------ PHOTOS -------------------------------
+# =========================================================
 
 class PhotoOut(BaseModel):
     id: int
@@ -143,8 +248,7 @@ class PhotoOut(BaseModel):
     lat: float
     lng: float
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PhotosUploadOut(BaseModel):
@@ -152,7 +256,9 @@ class PhotosUploadOut(BaseModel):
     photos: List[PhotoOut]
 
 
-# ------------------ SUBMISSION ------------------
+# =========================================================
+# ------------------ SUBMISSION ---------------------------
+# =========================================================
 
 class FinalSubmitIn(BaseModel):
     description: str
@@ -162,10 +268,9 @@ class SubmissionOut(BaseModel):
     id: int
     event_id: int
     status: str
-    description: Optional[str]
+    description: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AdminSubmissionOut(BaseModel):
@@ -174,6 +279,7 @@ class AdminSubmissionOut(BaseModel):
     student_id: int
     status: str
     description: Optional[str] = None
+
     submitted_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
@@ -184,8 +290,7 @@ class AdminSubmissionOut(BaseModel):
     cosine_score: Optional[float] = None
     flag_reason: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RejectIn(BaseModel):
