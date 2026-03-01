@@ -1,8 +1,9 @@
-# app/routes/events.py  ✅ FULL UPDATED (clean + permanent fix)
+# app/routes/events.py  ✅ FULL UPDATED (event photos + gps + clean fix)
 from __future__ import annotations
 
 from typing import List
-from datetime import datetime, date as date_type, time as time_type, timezone
+from datetime import datetime, date as date_type, time as time_type
+import math
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException, Form
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,9 +13,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_student, get_current_admin
 from app.core.activity_storage import upload_activity_image
 
-from app.models.activity_session import ActivitySession
-from app.models.activity_photo import ActivityPhoto
-from app.models.events import Event
+from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 from app.models.event_activity_type import EventActivityType
 
 from app.schemas.events import (
@@ -50,37 +49,26 @@ from app.controllers.events_controller import (
 
 router = APIRouter(tags=["Events"])
 
+DEFAULT_EVENT_RADIUS_M = 500
+
 
 # =========================================================
 # ---------------------- HELPERS --------------------------
 # =========================================================
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
-    # DB stores TIMESTAMP WITHOUT TZ for end_time
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
 
 def _as_naive_datetime_for_end_time(event_date: date_type | None, end_val):
-    """
-    Accepts:
-      - None
-      - time -> converts to naive datetime using event_date
-      - datetime -> strips tzinfo to naive
-    """
     if end_val is None:
         return None
-
     if isinstance(end_val, datetime):
         return end_val.replace(tzinfo=None)
-
     if isinstance(end_val, time_type):
         if not event_date:
-            raise HTTPException(
-                status_code=422,
-                detail="event_date is required when end_time is a time value",
-            )
-        return _combine_event_datetime_ist_naive(event_date, end_val)
-
+            raise HTTPException(status_code=422, detail="event_date is required when end_time is a time value")
+        return datetime.combine(event_date, end_val).replace(tzinfo=None)
     raise HTTPException(status_code=422, detail="Invalid end_time type")
 
 
@@ -100,22 +88,20 @@ def _event_out_dict(ev: Event) -> dict:
         "thumbnail_url": ev.thumbnail_url,
         "venue_name": getattr(ev, "venue_name", None),
         "maps_url": getattr(ev, "maps_url", None),
+
+        # ✅ NEW: geofence fields (must exist in Event model + schema)
+        "location_lat": getattr(ev, "location_lat", None),
+        "location_lng": getattr(ev, "location_lng", None),
+        "geo_radius_m": int(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M),
     }
 
 
 def _normalize_activity_type_ids(payload: EventCreateIn) -> list[int]:
-    """
-    ✅ Permanent fix:
-    Normalize whatever frontend sends into a clean list[int]
-    AND enforce at least 1 id.
-    """
     raw = getattr(payload, "activity_type_ids", None) or []
 
-    # sometimes frontend sends objects [{id:1},{id:2}]
     if isinstance(raw, list) and raw and isinstance(raw[0], dict):
         raw = [x.get("id") for x in raw]
 
-    # sometimes frontend sends csv string "1,2"
     if isinstance(raw, str):
         raw = [x.strip() for x in raw.split(",") if x.strip()]
 
@@ -129,8 +115,18 @@ def _normalize_activity_type_ids(payload: EventCreateIn) -> list[int]:
             except Exception:
                 pass
 
-    ids = sorted(set(ids))
-    return ids
+    return sorted(set(ids))
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    R = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
 
 # =========================================================
@@ -143,7 +139,6 @@ async def admin_create_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # create_event() already blocks if no activity types (permanent fix)
     return await create_event(db, payload)
 
 
@@ -172,7 +167,6 @@ async def admin_update_event_api(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # ✅ Permanent fix: force activity types while updating too
     ids = _normalize_activity_type_ids(payload)
     if not ids:
         raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
@@ -189,7 +183,15 @@ async def admin_update_event_api(
     ev.venue_name = (payload.venue_name or "").strip() or None
     ev.maps_url = (payload.maps_url or "").strip() or None
 
-    # ✅ replace mapping atomically
+    # ✅ NEW: allow updating geofence too
+    ev.location_lat = float(getattr(payload, "location_lat", None)) if getattr(payload, "location_lat", None) is not None else None
+    ev.location_lng = float(getattr(payload, "location_lng", None)) if getattr(payload, "location_lng", None) is not None else None
+    ev.geo_radius_m = int(getattr(payload, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
+
+    # if one provided, require both
+    if (ev.location_lat is None) ^ (ev.location_lng is None):
+        raise HTTPException(status_code=422, detail="Both location_lat and location_lng are required together")
+
     await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
     for at_id in ids:
         db.add(EventActivityType(event_id=event_id, activity_type_id=at_id))
@@ -217,7 +219,6 @@ async def admin_end_event_api(
     return await end_event(db, event_id)
 
 
-# ✅ One-click: auto approve (face verified) + issue certificates
 @router.post("/admin/events/{event_id}/approve-and-issue")
 async def admin_auto_approve_and_issue(
     event_id: int,
@@ -227,7 +228,6 @@ async def admin_auto_approve_and_issue(
     return await auto_approve_event_from_sessions(db, event_id)
 
 
-# ✅ Regenerate certificates (idempotent)
 @router.post("/admin/events/{event_id}/certificates/regenerate")
 async def admin_regenerate_event_certificates(
     event_id: int,
@@ -290,8 +290,7 @@ async def register_event(
     return await register_for_event(db, student.id, event_id)
 
 
-# NOTE: This endpoint is currently using ActivitySession/ActivityPhoto model.
-# If this is actually EVENT submission photos, you should switch to EventSubmissionPhoto logic.
+# ✅ FIXED: event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
 @router.post("/student/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
@@ -302,60 +301,89 @@ async def upload_photos(
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
-    session_res = await db.execute(
-        select(ActivitySession).where(
-            ActivitySession.id == submission_id,
-            ActivitySession.student_id == student.id,
+    sub_res = await db.execute(
+        select(EventSubmission).where(
+            EventSubmission.id == submission_id,
+            EventSubmission.student_id == student.id,
         )
     )
-    session = session_res.scalar_one_or_none()
-    if not session:
-        raise HTTPException(status_code=404, detail="Submission/Session not found for this student")
+    sub = sub_res.scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Submission not found for this student")
+
+    if sub.status != "in_progress":
+        raise HTTPException(status_code=400, detail="Submission already completed")
+
+    ev_res = await db.execute(select(Event).where(Event.id == sub.event_id))
+    ev = ev_res.scalar_one_or_none()
+    if not ev:
+        raise HTTPException(status_code=404, detail="Event not found")
 
     if len(lats) != len(images) or len(lngs) != len(images):
         raise HTTPException(status_code=422, detail="lats/lngs count must match number of images")
 
-    results: List[ActivityPhoto] = []
+    required_photos = int(getattr(ev, "required_photos", 3) or 3)
+    if start_seq < 1 or start_seq > required_photos:
+        raise HTTPException(status_code=400, detail=f"start_seq must be between 1 and {required_photos}")
+
+    results: List[EventSubmissionPhoto] = []
     seq_no = start_seq
 
+    # geofence target
+    target_lat = getattr(ev, "location_lat", None)
+    target_lng = getattr(ev, "location_lng", None)
+    radius_m = float(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
+
     for idx, img in enumerate(images):
+        if seq_no > required_photos:
+            break
+
         file_bytes = await img.read()
         if not file_bytes:
+            seq_no += 1
             continue
 
         image_url = await upload_activity_image(
             file_bytes=file_bytes,
             content_type=img.content_type or "application/octet-stream",
-            filename=img.filename or f"photo_{seq_no}.jpg",
+            filename=img.filename or f"event_{submission_id}_{seq_no}.jpg",
             student_id=student.id,
-            session_id=session.id,
+            session_id=submission_id,  # ok for storage path; it's just a grouping id
         )
 
+        lat = float(lats[idx]) if lats[idx] is not None else None
+        lng = float(lngs[idx]) if lngs[idx] is not None else None
+
+        dist = None
+        in_geo = None
+        if target_lat is not None and target_lng is not None and lat is not None and lng is not None:
+            dist = _haversine_m(lat, lng, float(target_lat), float(target_lng))
+            in_geo = dist <= radius_m
+
         photo_res = await db.execute(
-            select(ActivityPhoto).where(
-                ActivityPhoto.session_id == session.id,
-                ActivityPhoto.seq_no == seq_no,
+            select(EventSubmissionPhoto).where(
+                EventSubmissionPhoto.submission_id == submission_id,
+                EventSubmissionPhoto.seq_no == seq_no,
             )
         )
         existing = photo_res.scalar_one_or_none()
 
-        now_utc = datetime.now(timezone.utc)
         if existing:
             existing.image_url = image_url
-            existing.student_id = student.id
-            existing.lat = float(lats[idx])
-            existing.lng = float(lngs[idx])
-            existing.captured_at = now_utc
+            existing.lat = lat
+            existing.lng = lng
+            existing.distance_m = float(dist) if dist is not None else None
+            existing.is_in_geofence = bool(in_geo) if in_geo is not None else None
             photo = existing
         else:
-            photo = ActivityPhoto(
-                session_id=session.id,
-                student_id=student.id,
+            photo = EventSubmissionPhoto(
+                submission_id=submission_id,
                 seq_no=seq_no,
                 image_url=image_url,
-                lat=float(lats[idx]),
-                lng=float(lngs[idx]),
-                captured_at=now_utc,
+                lat=lat,
+                lng=lng,
+                distance_m=float(dist) if dist is not None else None,
+                is_in_geofence=bool(in_geo) if in_geo is not None else None,
             )
             db.add(photo)
 
@@ -364,7 +392,7 @@ async def upload_photos(
         results.append(photo)
         seq_no += 1
 
-    return PhotosUploadOut(session_id=session.id, photos=results)
+    return PhotosUploadOut(submission_id=submission_id, photos=results)
 
 
 @router.post("/student/submissions/{submission_id}/submit", response_model=SubmissionOut)
