@@ -36,6 +36,9 @@ from app.routes.activity_types import router as activity_types_router
 from app.routes.public_verify import router as public_verify_router
 from app.routes.student_certificates import router as student_certificates_router
 
+# ✅ NEW: Admin Dashboard routes (for backend-powered dashboard)
+from app.routes.admin_dashboard import router as admin_dashboard_router
+
 
 # ───────────────── APP INIT ─────────────────
 app = FastAPI(
@@ -69,29 +72,22 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # ───────────────── CORS CONFIG ─────────────────
 
-# Default allowed origins
 default_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-
     "http://31.97.230.171",
     "http://31.97.230.171:3000",
     "http://31.97.230.171:5173",
-
     "https://31.97.230.171",
     "https://31.97.230.171:3000",
     "https://31.97.230.171:5173",
 ]
 
-# Merge with origins from .env (if provided)
 origins = set(default_origins)
-
 if settings.origins_list:
-    origins.update(
-        [o.strip() for o in settings.origins_list if o and o.strip()]
-    )
+    origins.update([o.strip() for o in settings.origins_list if o and o.strip()])
 
 app.add_middleware(
     CORSMiddleware,
@@ -135,6 +131,13 @@ app.include_router(student_certificates_router, prefix="/api")
 
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(face_router, prefix="/api")
+
+# ✅ NEW: dashboard endpoints:
+# /api/admin/dashboard/stats
+# /api/admin/dashboard/category-progress
+# /api/admin/dashboard/student-progress
+# /api/admin/dashboard/recent-submissions
+app.include_router(admin_dashboard_router, prefix="/api")
 
 
 # ───────────────── HEALTH ─────────────────
