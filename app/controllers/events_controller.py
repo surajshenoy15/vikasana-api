@@ -1,29 +1,24 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
-from datetime import datetime, timezone
+
+from datetime import datetime, date as date_type, time as time_type, timezone
+from zoneinfo import ZoneInfo
+from typing import Any, Optional
 from urllib.parse import quote
 
-from sqlalchemy import select, func
+from fastapi import HTTPException
+from sqlalchemy import select, func, delete as sql_delete, update, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
-from app.core.cert_storage import upload_certificate_pdf_bytes
+from app.core.cert_storage import (
+    upload_certificate_pdf_bytes,
+    presign_certificate_download_url,
+)
 
-from app.models.events import Event, EventSubmission
-from app.models.student import Student
-from app.models.certificate import Certificate
-
-
-
-from datetime import datetime, date as date_type, time as time_type, timezone
-from zoneinfo import ZoneInfo
-from typing import Iterable
-
-from fastapi import HTTPException
-from sqlalchemy import select, func, delete as sql_delete, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 from app.models.events import Event, EventSubmission, EventSubmissionPhoto
 from app.models.student import Student
@@ -37,18 +32,89 @@ from app.models.event_activity_type import EventActivityType
 
 # ✅ Certificates
 from app.models.certificate import Certificate, CertificateCounter
-from app.core.cert_sign import sign_cert
-from app.core.cert_pdf import build_certificate_pdf
-from app.core.config import settings
 
-# ✅ MinIO upload + presign
-from app.core.cert_storage import upload_certificate_pdf_bytes, presign_certificate_download_url
-
-# ✅ Thumbnail presign
-from app.core.event_thumbnail_storage import generate_event_thumbnail_presigned_put
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 IST = ZoneInfo("Asia/Kolkata")
+
+
+# =========================================================
+# ---------------------- PARSERS ---------------------------
+# =========================================================
+
+def _parse_date(val: Any) -> Optional[date_type]:
+    """
+    Accepts:
+      - date
+      - datetime
+      - ISO string: "2026-03-01" or "2026-03-01T10:00:00"
+    """
+    if val is None:
+        return None
+    if isinstance(val, date_type) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        # take first 10 chars for YYYY-MM-DD
+        try:
+            return date_type.fromisoformat(s[:10])
+        except Exception:
+            return None
+    return None
+
+
+def _parse_time(val: Any) -> Optional[time_type]:
+    """
+    Accepts:
+      - time
+      - datetime (uses .time())
+      - strings: "HH:MM", "HH:MM:SS", "HH:MM:SS.sss"
+      - ISO datetime strings: "2026-03-01T12:22:00"
+    Returns: datetime.time or None
+    """
+    if val is None:
+        return None
+
+    if isinstance(val, time_type) and not isinstance(val, datetime):
+        return val.replace(tzinfo=None)
+
+    if isinstance(val, datetime):
+        return val.time().replace(tzinfo=None)
+
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+
+        # ISO datetime → extract time
+        if "T" in s or " " in s:
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                return dt.time().replace(tzinfo=None)
+            except Exception:
+                pass
+
+        # time-only: HH:MM[:SS[.ffffff]]
+        try:
+            return time_type.fromisoformat(s).replace(tzinfo=None)
+        except Exception:
+            pass
+
+        # manual fallback
+        try:
+            parts = s.split(":")
+            hh = int(parts[0])
+            mm = int(parts[1]) if len(parts) > 1 else 0
+            ss = int(float(parts[2])) if len(parts) > 2 else 0
+            return time_type(hour=hh, minute=mm, second=ss)
+        except Exception:
+            return None
+
+    return None
 
 
 # =========================================================
@@ -56,32 +122,13 @@ IST = ZoneInfo("Asia/Kolkata")
 # =========================================================
 
 def _now_ist_naive() -> datetime:
-    # IST clock-time, tzinfo removed because your Event.end_time is stored as naive
+    # IST clock-time, tzinfo removed because Event.end_time is stored as naive
     return datetime.now(IST).replace(tzinfo=None)
 
 
 def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
     return datetime.combine(event_date, t).replace(tzinfo=None)
 
-
-def _extract_activity_type_ids(payload) -> list[int]:
-    raw = getattr(payload, "activity_type_ids", None)
-
-    # accept string: "6,7"
-    if isinstance(raw, str):
-        raw = [x.strip() for x in raw.split(",") if x.strip()]
-
-    ids: list[int] = []
-    if isinstance(raw, list):
-        for x in raw:
-            try:
-                v = int(x)
-                if v > 0:
-                    ids.append(v)
-            except Exception:
-                pass
-
-    return sorted(set(ids))
 
 def _ensure_event_window(event: Event) -> None:
     now_dt = _now_ist_naive()
@@ -135,7 +182,6 @@ def _event_window_ist_naive(event: Event) -> tuple[datetime, datetime]:
     return start_dt, end_dt
 
 
-# ✅ NEW: convert IST-naive -> UTC-aware for comparing with ActivitySession timestamps (usually UTC aware)
 def _ist_naive_to_utc_aware(dt_naive_ist: datetime) -> datetime:
     """
     Treat dt_naive_ist as IST clock time and convert to UTC aware.
@@ -144,7 +190,6 @@ def _ist_naive_to_utc_aware(dt_naive_ist: datetime) -> datetime:
     return dt_naive_ist.replace(tzinfo=IST).astimezone(timezone.utc)
 
 
-# ✅ NEW: event window in UTC aware
 def _event_window_utc(event: Event) -> tuple[datetime, datetime]:
     start_ist_naive, end_ist_naive = _event_window_ist_naive(event)
     return _ist_naive_to_utc_aware(start_ist_naive), _ist_naive_to_utc_aware(end_ist_naive)
@@ -243,9 +288,8 @@ async def _eligible_students_from_sessions(
     ✅ Students eligible for auto-approval:
     - Have ActivitySession APPROVED (face verified)
     - Session.activity_type_id in event's mapped activity_type_ids
-    - Session.started_at within event window
+    - Session.started_at within event window (UTC-aware)
 
-    ✅ IMPORTANT FIX:
     ActivitySession.started_at is usually UTC-aware.
     So compare against event window converted to UTC-aware.
     """
@@ -271,9 +315,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     - Finds students with APPROVED face sessions within event window
     - Upserts EventSubmission => status=approved, sets submitted_at+approved_at
     - Generates certificates for them
-
-    Returns:
-      {event_id, eligible_students, submissions_approved, certificates_issued}
     """
     event = await db.get(Event, event_id)
     if not event:
@@ -295,27 +336,15 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         )
         activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
-    # ✅ Still nothing => nothing to approve / generate
     if not activity_type_ids:
-        return {
-            "event_id": event_id,
-            "eligible_students": 0,
-            "submissions_approved": 0,
-            "certificates_issued": 0,
-        }
+        return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
 
     eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
     if not eligible_student_ids:
-        return {
-            "event_id": event_id,
-            "eligible_students": 0,
-            "submissions_approved": 0,
-            "certificates_issued": 0,
-        }
+        return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
 
     now_utc = datetime.now(timezone.utc)
 
-    # Upsert submissions
     submissions_approved = 0
     for sid in eligible_student_ids:
         res = await db.execute(
@@ -327,11 +356,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         sub = res.scalar_one_or_none()
 
         if sub is None:
-            sub = EventSubmission(
-                event_id=event_id,
-                student_id=sid,
-                status="approved",
-            )
+            sub = EventSubmission(event_id=event_id, student_id=sid, status="approved")
             if hasattr(sub, "submitted_at"):
                 sub.submitted_at = now_utc
             if hasattr(sub, "approved_at"):
@@ -349,7 +374,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
     await db.commit()
 
-    # Generate certificates (only for APPROVED submissions)
     issued = await _issue_certificates_for_event(db, event)
 
     return {
@@ -359,11 +383,6 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
         "certificates_issued": issued,
     }
 
-
-
-from sqlalchemy import select, func, cast, String
-from datetime import datetime, timezone
-from urllib.parse import quote
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     q = await db.execute(
@@ -376,7 +395,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     if not submissions:
         return 0
 
-    # ✅ STRICT: always use event mapped activity types
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     activity_type_ids = sorted(set(int(x) for x in activity_type_ids if x is not None))
 
@@ -419,7 +437,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
         usn = (getattr(student, "usn", None) or "").strip()
 
         for at_id in activity_type_ids:
-            # ✅ avoid duplicates
             ex = await db.execute(
                 select(Certificate.id).where(
                     Certificate.submission_id == sub.id,
@@ -429,7 +446,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             if ex.scalar_one_or_none():
                 continue
 
-            # ✅ hours for this activity type within event window (optional info)
             hrs_q = await db.execute(
                 select(func.coalesce(func.sum(ActivitySession.duration_hours), 0.0)).where(
                     ActivitySession.student_id == sub.student_id,
@@ -441,23 +457,18 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
             )
             hours = float(hrs_q.scalar() or 0.0)
 
-            # ✅ DO NOT SKIP when hours = 0
             at = at_by_id.get(at_id)
             activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
 
-            # ✅ points calc (safe even if hours = 0)
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
                 hpu = getattr(at, "hours_per_unit", None)
-
                 if ppu is not None and hpu and hours > 0:
                     try:
                         points_awarded = int(round((hours / float(hpu)) * float(ppu)))
                     except Exception:
                         points_awarded = 0
-                else:
-                    points_awarded = 0
 
             cert_no = await _next_certificate_no(db, academic_year, now_ist)
 
@@ -507,7 +518,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 async def list_student_event_certificates(db: AsyncSession, student_id: int, event_id: int) -> list[dict]:
     q = await db.execute(
         select(Certificate, ActivityType.name)
-        .outerjoin(ActivityType, ActivityType.id == Certificate.activity_type_id)  # ✅ changed
+        .outerjoin(ActivityType, ActivityType.id == Certificate.activity_type_id)
         .where(
             Certificate.student_id == student_id,
             Certificate.event_id == event_id,
@@ -533,7 +544,7 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
             "event_id": cert.event_id,
             "submission_id": cert.submission_id,
             "activity_type_id": cert.activity_type_id,
-            "activity_type_name": at_name or f"Activity Type #{cert.activity_type_id}",  # ✅ safe fallback
+            "activity_type_name": at_name or f"Activity Type #{cert.activity_type_id}",
             "pdf_url": pdf_url,
         })
     return out
@@ -541,8 +552,7 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
 
 async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
     """
-    ✅ NEW behavior (as you asked):
-    - Only allow when event is ENDED (is_active = False)
+    - Only allow when event is ENDED (is_active=False)
     - Auto-approve submissions from APPROVED face sessions
     - Then generate certificates for all approved submissions
     """
@@ -550,18 +560,10 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # 🔒 Enforce "End first, then generate"
     if bool(getattr(event, "is_active", True)):
         raise HTTPException(status_code=400, detail="End the event first, then generate certificates")
 
-    # 1) Auto-approve from face-approved sessions (this also issues certs currently)
     result = await auto_approve_event_from_sessions(db, event_id)
-
-    # NOTE: auto_approve_event_from_sessions already calls _issue_certificates_for_event
-    # So certificates are already generated here.
-    # But to be extra safe, you can also call issue again (it will skip duplicates):
-    # issued_extra = await _issue_certificates_for_event(db, event)
-    # result["certificates_issued"] += issued_extra
 
     if int(result.get("certificates_issued", 0)) == 0:
         raise HTTPException(
@@ -575,6 +577,7 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict
         "submissions_approved": result.get("submissions_approved", 0),
         "certificates_issued": result.get("certificates_issued", 0),
     }
+
 
 # =========================================================
 # ---------------------- THUMBNAIL -------------------------
@@ -592,23 +595,17 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # ---------------------- ADMIN -----------------------------
 # =========================================================
 
-# =========================================================
-# ---------------------- ADMIN -----------------------------
-# =========================================================
-
 async def create_event(db: AsyncSession, payload):
     """
-    ✅ FULL UPDATED (PERMANENT FIX)
-    - flush to get event.id (atomic transaction)
-    - saves event + mapping rows in ONE commit
-    - stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ
-    - accepts activity types from multiple frontend shapes
-    - blocks creation if no activity types selected (prevents empty mapping forever)
+    ✅ FIXED create_event:
+    - Parses event_date (string -> date)
+    - Parses start_time (string -> time) ✅ fixes your 500
+    - Parses end_time (string/time -> naive datetime)
+    - Atomic commit with mapping rows
+    - Blocks empty mapping
     """
 
-    # ─────────────────────────────────────────────────────────────
-    # Debug (keep)
-    # ─────────────────────────────────────────────────────────────
+    # Debug
     try:
         print("=== CREATE EVENT DEBUG ===")
         if hasattr(payload, "model_dump"):
@@ -625,6 +622,9 @@ async def create_event(db: AsyncSession, payload):
             "activity_types",
             "activity_type_id",
             "activity_list",
+            "event_date",
+            "start_time",
+            "end_time",
         ]:
             print(f"{k}:", getattr(payload, k, None))
         print("==========================")
@@ -632,29 +632,38 @@ async def create_event(db: AsyncSession, payload):
         print("CREATE EVENT DEBUG FAILED:", e)
 
     # ─────────────────────────────────────────────────────────────
-    # Read event fields (tolerant keys)
+    # Parse event_date
     # ─────────────────────────────────────────────────────────────
-    event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    event_date_raw = getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    event_date = _parse_date(event_date_raw)
+    if not event_date:
+        raise HTTPException(status_code=422, detail="event_date is required and must be a valid date")
 
-    start_time = (
+    # ─────────────────────────────────────────────────────────────
+    # Parse start_time  ✅ CRITICAL FIX
+    # ─────────────────────────────────────────────────────────────
+    start_time_raw = (
         getattr(payload, "start_time", None)
         or getattr(payload, "event_time", None)
         or getattr(payload, "time", None)
     )
+    start_time = _parse_time(start_time_raw)
+    if start_time_raw is not None and start_time is None:
+        raise HTTPException(status_code=422, detail="start_time must be a valid time like HH:MM")
 
+    # ─────────────────────────────────────────────────────────────
+    # Parse end_time -> store as naive datetime (IST clock)
+    # ─────────────────────────────────────────────────────────────
     end_time_raw = getattr(payload, "end_time", None)
-
     end_time_dt = None
-    if end_time_raw:
+    if end_time_raw is not None and end_time_raw != "":
         if isinstance(end_time_raw, datetime):
             end_time_dt = end_time_raw.replace(tzinfo=None)
-        elif isinstance(end_time_raw, time_type):
-            if not event_date:
-                raise HTTPException(
-                    status_code=422,
-                    detail="event_date is required when end_time is a time value",
-                )
-            end_time_dt = _combine_event_datetime_ist_naive(event_date, end_time_raw)
+        else:
+            end_t = _parse_time(end_time_raw)
+            if end_t is None:
+                raise HTTPException(status_code=422, detail="end_time must be a valid time like HH:MM")
+            end_time_dt = _combine_event_datetime_ist_naive(event_date, end_t)
 
     venue_name = getattr(payload, "venue_name", None)
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
@@ -668,16 +677,15 @@ async def create_event(db: AsyncSession, payload):
         required_photos=int(getattr(payload, "required_photos", 3) or 3),
         is_active=True,
         event_date=event_date,
-        start_time=start_time,
-        end_time=end_time_dt,
+        start_time=start_time,   # ✅ time object, not string
+        end_time=end_time_dt,    # ✅ naive datetime for DB
         thumbnail_url=getattr(payload, "thumbnail_url", None),
         venue_name=venue_name,
         maps_url=maps_url,
     )
     db.add(event)
 
-    # ✅ get event.id without committing
-    await db.flush()
+    await db.flush()  # ✅ get event.id without committing
 
     # ─────────────────────────────────────────────────────────────
     # Robust activity type extraction
@@ -729,19 +737,13 @@ async def create_event(db: AsyncSession, payload):
     ids = sorted(set(ids))
     print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
 
-    # ✅ PERMANENT FIX: do not allow empty mapping
     if not ids:
         await db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail="Please select at least 1 activity type for this event.",
-        )
+        raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
 
-    # save mapping rows
     for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
 
-    # one atomic commit
     await db.commit()
     await db.refresh(event)
     return _event_out_dict(event)
@@ -777,20 +779,14 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
     await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
 
-    sub_result = await db.execute(
-        select(EventSubmission.id).where(EventSubmission.event_id == event_id)
-    )
+    sub_result = await db.execute(select(EventSubmission.id).where(EventSubmission.event_id == event_id))
     submission_ids = [row[0] for row in sub_result.fetchall()]
 
     if submission_ids:
         await db.execute(
-            sql_delete(EventSubmissionPhoto).where(
-                EventSubmissionPhoto.submission_id.in_(submission_ids)
-            )
+            sql_delete(EventSubmissionPhoto).where(EventSubmissionPhoto.submission_id.in_(submission_ids))
         )
-        await db.execute(
-            sql_delete(EventSubmission).where(EventSubmission.event_id == event_id)
-        )
+        await db.execute(sql_delete(EventSubmission).where(EventSubmission.event_id == event_id))
 
     await db.execute(sql_delete(Event).where(Event.id == event_id))
     await db.commit()
@@ -817,7 +813,6 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     await db.commit()
     await db.refresh(submission)
 
-    # ✅ generate certificates for this event (idempotent, won't duplicate)
     event = await db.get(Event, submission.event_id)
     if event:
         await _issue_certificates_for_event(db, event)
@@ -902,7 +897,7 @@ async def add_photo(
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
-            EventSubmission.student_id == student_id
+            EventSubmission.student_id == student_id,
         )
     )
     submission = q.scalar_one_or_none()
@@ -926,7 +921,7 @@ async def add_photo(
     q = await db.execute(
         select(EventSubmissionPhoto).where(
             EventSubmissionPhoto.submission_id == submission_id,
-            EventSubmissionPhoto.seq_no == seq_no
+            EventSubmissionPhoto.seq_no == seq_no,
         )
     )
     existing_photo = q.scalar_one_or_none()
@@ -952,7 +947,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     q = await db.execute(
         select(EventSubmission).where(
             EventSubmission.id == submission_id,
-            EventSubmission.student_id == student_id
+            EventSubmission.student_id == student_id,
         )
     )
     submission = q.scalar_one_or_none()
@@ -984,7 +979,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             detail=(
                 f"You must upload at least {required_photos} photos before submitting. "
                 f"Currently uploaded: {uploaded_photos}"
-            )
+            ),
         )
 
     submission.status = "submitted"
