@@ -54,15 +54,18 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return R * c
 
 
-async def _get_activity_type_for_session(db: AsyncSession, session: ActivitySession) -> Optional[ActivityType]:
-    """
-    Returns ActivityType for a session.
-    """
-    if getattr(session, "activity_type", None) is not None:
-        return session.activity_type
 
-    at_res = await db.execute(select(ActivityType).where(ActivityType.id == session.activity_type_id))
-    return at_res.scalar_one_or_none()
+async def _get_activity_type_for_session(db: AsyncSession, session: ActivitySession) -> ActivityType | None:
+    """
+    Async-safe: DO NOT touch session.activity_type (lazy load causes MissingGreenlet).
+    Always fetch ActivityType explicitly by activity_type_id.
+    """
+    at_id = getattr(session, "activity_type_id", None)
+    if not at_id:
+        return None
+
+    res = await db.execute(select(ActivityType).where(ActivityType.id == at_id))
+    return res.scalar_one_or_none()
 
 
 def _compute_geofence_verdict(
