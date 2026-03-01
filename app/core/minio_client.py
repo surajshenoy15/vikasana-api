@@ -1,35 +1,37 @@
 import os
-from minio import Minio
-from minio.error import S3Error
 from datetime import timedelta
+from minio import Minio
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = str(os.getenv(name, "")).strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "y", "on")
 
 
 def get_minio() -> Minio:
-    endpoint = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000")
-    access_key = os.getenv("MINIO_ACCESS_KEY", "")
-    secret_key = os.getenv("MINIO_SECRET_KEY", "")
-    secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
+    endpoint = os.getenv("MINIO_ENDPOINT", "127.0.0.1:9000").strip()
+    access_key = os.getenv("MINIO_ACCESS_KEY", "").strip()
+    secret_key = os.getenv("MINIO_SECRET_KEY", "").strip()
+    secure = _env_bool("MINIO_SECURE", default=False)  # keep false for http
 
     return Minio(
-        endpoint,
+        endpoint=endpoint,
         access_key=access_key,
         secret_key=secret_key,
         secure=secure,
     )
 
 
-def ensure_bucket(minio: Minio, bucket: str) -> None:
-    found = minio.bucket_exists(bucket)
-    if not found:
-        minio.make_bucket(bucket)
-
-
-# ✅ ADD THIS
-def get_presigned_url(bucket: str, object_name: str, expiry_seconds: int = 3600) -> str:
+def get_presigned_url_internal(bucket: str, object_name: str, expiry_seconds: int = 900) -> str:
+    """
+    Internal presigned URL (HTTP). DO NOT use directly in HTTPS browser pages.
+    Use the proxy route below instead.
+    """
     minio = get_minio()
-
     return minio.presigned_get_object(
         bucket_name=bucket,
         object_name=object_name,
-        expires=timedelta(seconds=expiry_seconds),
+        expires=timedelta(seconds=int(expiry_seconds or 900)),
     )

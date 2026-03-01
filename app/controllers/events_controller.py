@@ -132,13 +132,30 @@ def _event_window_utc(event: Event) -> tuple[datetime, datetime]:
 
 
 def _event_out_dict(event: Event) -> dict:
-    """
-    ✅ EventOut schema expects end_time as Optional[time].
-    But DB stores end_time as naive datetime.
-    So convert datetime -> time for API response.
-    """
     end_val = getattr(event, "end_time", None)
     end_time = end_val.time() if isinstance(end_val, datetime) else end_val
+
+    thumb_key = getattr(event, "thumbnail_url", None)  # likely stores object_name or full url
+
+    # ✅ If you store object_name in thumbnail_url, convert it:
+    thumbnail_url = None
+    if thumb_key:
+        # If thumb_key is already a full http url, try to extract object_name if possible,
+        # else just pass it through.
+        # Best: store ONLY object_name like "thumbnails/2/abc.png"
+        obj_name = thumb_key
+
+        # If you accidentally stored full minio url, try to strip path after bucket
+        # (optional; safe fallback)
+        marker = f"/{settings.MINIO_BUCKET_EVENT_THUMBNAILS}/"
+        if marker in thumb_key:
+            obj_name = thumb_key.split(marker, 1)[1].split("?", 1)[0]
+
+        thumbnail_url = (
+            f"{settings.PUBLIC_BASE_URL}/api/public/minio/object"
+            f"?bucket={settings.MINIO_BUCKET_EVENT_THUMBNAILS}"
+            f"&object_name={quote(obj_name)}"
+        )
 
     return {
         "id": event.id,
@@ -151,7 +168,7 @@ def _event_out_dict(event: Event) -> dict:
         "end_time": end_time,
         "venue_name": getattr(event, "venue_name", None),
         "maps_url": getattr(event, "maps_url", None),
-        "thumbnail_url": getattr(event, "thumbnail_url", None),
+        "thumbnail_url": thumbnail_url,  # ✅ now HTTPS-safe
     }
 
 

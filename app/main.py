@@ -40,6 +40,10 @@ from app.routes.student_certificates import router as student_certificates_route
 from app.routes.admin_dashboard import router as admin_dashboard_router
 from app.routes.admin_certificates import router as admin_certificates_router
 
+# ✅ NEW: HTTPS-safe MinIO proxy (serve images via API, not http://minio:9000)
+# Create this file: app/routes/public_minio.py (router prefix "/public/minio")
+from app.routes.public_minio import router as public_minio_router
+
 
 # ───────────────── APP INIT ─────────────────
 app = FastAPI(
@@ -142,6 +146,11 @@ app.include_router(admin_dashboard_router, prefix="/api")
 
 # ✅ Admin certificates endpoints
 app.include_router(admin_certificates_router, prefix="/api")
+
+# ✅ NEW: Public MinIO proxy endpoints (use in UI for thumbnails, certificates, etc.)
+# Example:
+#   /api/public/minio/object?bucket=vikasana-event-thumbnails&object_name=thumbnails/2/xxx.png
+app.include_router(public_minio_router, prefix="/api")
 
 
 # ───────────────── HEALTH ─────────────────
