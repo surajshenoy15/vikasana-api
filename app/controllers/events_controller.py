@@ -573,7 +573,19 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # ---------------------- ADMIN -----------------------------
 # =========================================================
 
+# =========================================================
+# ---------------------- ADMIN -----------------------------
+# =========================================================
+
 async def create_event(db: AsyncSession, payload):
+    """
+    ✅ UPDATED:
+    - Uses flush (not commit) to get event.id
+    - Saves event + mapping rows in ONE transaction (atomic)
+    - Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
+    - ✅ Robustly accepts activity type ids from multiple frontend shapes
+    """
+
     # ✅ DEBUG LOGS (keep)
     try:
         print("=== CREATE EVENT DEBUG ===")
@@ -585,21 +597,18 @@ async def create_event(db: AsyncSession, payload):
         else:
             print("Payload raw:", payload)
 
-        print("activity_type_ids:", getattr(payload, "activity_type_ids", None))
-        print("activity_list:", getattr(payload, "activity_list", None))
-
-        for k in ["activity_types", "activityTypeIds", "activityTypes", "activity_type_id", "activity_type"]:
+        for k in [
+            "activity_type_ids",
+            "activityTypeIds",
+            "activityTypes",
+            "activity_types",
+            "activity_type_id",
+            "activity_list",
+        ]:
             print(f"{k}:", getattr(payload, k, None))
         print("==========================")
     except Exception as e:
         print("CREATE EVENT DEBUG FAILED:", e)
-
-    """
-    ✅ UPDATED:
-    - Uses flush (not commit) to get event.id
-    - Saves event + mapping rows in ONE transaction (atomic)
-    - Stores end_time as NAIVE datetime (IST clock) because DB is TIMESTAMP WITHOUT TZ.
-    """
 
     event_date = getattr(payload, "event_date", None) or getattr(payload, "date", None)
     start_time = (
@@ -639,23 +648,40 @@ async def create_event(db: AsyncSession, payload):
     await db.flush()
 
     # ─────────────────────────────────────────────────────
-    # ✅ Save selected activity types for this event
+    # ✅ Save selected activity types for this event (ROBUST)
     # ─────────────────────────────────────────────────────
-
     ids: list[int] = []
 
-    raw_ids = getattr(payload, "activity_type_ids", None) or []
-    # also accept possible frontend variants (optional)
-    if not raw_ids:
-        raw_ids = getattr(payload, "activityTypeIds", None) or getattr(payload, "activityTypes", None) or []
+    raw_ids = (
+        getattr(payload, "activity_type_ids", None)
+        or getattr(payload, "activityTypeIds", None)
+        or getattr(payload, "activityTypes", None)
+        or getattr(payload, "activity_types", None)
+        or []
+    )
 
-    for x in raw_ids:
-        try:
-            v = int(x)
-            if v > 0:
-                ids.append(v)
-        except Exception:
-            pass
+    # If frontend sends objects: [{id: 6}, {id: 7}]
+    if isinstance(raw_ids, list) and raw_ids and isinstance(raw_ids[0], dict):
+        raw_ids = [x.get("id") for x in raw_ids]
+
+    # If frontend sends single id: activity_type_id
+    single = getattr(payload, "activity_type_id", None)
+    if single is not None and not raw_ids:
+        raw_ids = [single]
+
+    # If frontend sends comma string: "6,7"
+    if isinstance(raw_ids, str):
+        raw_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+
+    # Convert to ints
+    if isinstance(raw_ids, list):
+        for x in raw_ids:
+            try:
+                v = int(x)
+                if v > 0:
+                    ids.append(v)
+            except Exception:
+                pass
 
     # fallback: map by names if frontend sends activity_list
     if not ids:
@@ -670,16 +696,16 @@ async def create_event(db: AsyncSession, payload):
 
     ids = sorted(set(ids))
 
-    # ✅ DEBUG: show what IDs we will save
     print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS:", ids)
+
+    # Optional: clear previous mapping if you allow editing (safe for create too)
+    # await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event.id))
 
     for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
 
-    # ✅ single commit for event + mapping
     await db.commit()
     await db.refresh(event)
-
     return _event_out_dict(event)
 
 
