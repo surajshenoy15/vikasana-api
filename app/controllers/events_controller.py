@@ -815,112 +815,83 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 
 async def create_event(db: AsyncSession, payload):
     """
-    ✅ PERMANENT FIX create_event (matches your DB schema):
-    - event_date: DATE
-    - start_time: TIME
-    - end_time: TIME  ✅ (NO datetime here)
-    - Requires end_time (prevents NULL windows)
-    - Uses ONLY payload.activity_type_ids for mapping (prevents wrong IDs)
-    - Validates activity_type_ids exist
-    - Inserts mapping rows atomically
+    ✅ Permanent create_event fix:
+    - event_date: required
+    - start_time: required
+    - end_time: required (TIME column)
+    - mapping: uses ONLY payload.activity_type_ids (schema already normalizes keys)
+    - validates ActivityType ids exist
+    - inserts mapping rows atomically
     """
 
-    # ─────────────────────────────────────────────────────────────
-    # event_date (schema already parses, but keep fallback safe)
-    # ─────────────────────────────────────────────────────────────
-    event_date: date_type | None = getattr(payload, "event_date", None) or _parse_date(getattr(payload, "date", None))
+    # Parse event_date
+    event_date_raw = getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    event_date = _parse_date(event_date_raw)
     if not event_date:
-        raise HTTPException(status_code=422, detail="event_date is required")
+        raise HTTPException(status_code=422, detail="event_date is required and must be a valid date")
 
-    # ─────────────────────────────────────────────────────────────
-    # start_time (TIME)
-    # ─────────────────────────────────────────────────────────────
-    st: time_type | None = getattr(payload, "start_time", None)
-    if st is None:
-        st = _parse_time(getattr(payload, "event_time", None) or getattr(payload, "time", None))
-    if st is None:
-        raise HTTPException(status_code=422, detail="start_time is required (HH:MM)")
+    # Parse start_time
+    start_time_raw = getattr(payload, "start_time", None) or getattr(payload, "event_time", None) or getattr(payload, "time", None)
+    start_time = _parse_time(start_time_raw)
+    if start_time is None:
+        raise HTTPException(status_code=422, detail="start_time is required and must be a valid time like HH:MM")
 
-    # ─────────────────────────────────────────────────────────────
-    # end_time (TIME)  ✅ REQUIRED
-    # ─────────────────────────────────────────────────────────────
-    et_raw = getattr(payload, "end_time", None)
+    # Parse end_time (TIME column) — REQUIRED
+    end_time_raw = getattr(payload, "end_time", None)
+    end_time: time_type | None = None
+    if end_time_raw is not None and str(end_time_raw).strip() != "":
+        if isinstance(end_time_raw, datetime):
+            end_time = end_time_raw.time().replace(tzinfo=None)
+        else:
+            end_time = _parse_time(end_time_raw)
 
-    et: time_type | None = None
-    if isinstance(et_raw, time_type):
-        et = et_raw
-    elif isinstance(et_raw, datetime):
-        et = et_raw.time()
-    elif et_raw is not None and str(et_raw).strip() != "":
-        et = _parse_time(et_raw)
+    if end_time is None:
+        raise HTTPException(status_code=422, detail="end_time is required and must be a valid time like HH:MM")
 
-    if et is None:
-        raise HTTPException(status_code=422, detail="end_time is required (HH:MM)")
-
-    # same-day sanity
-    if et <= st:
+    if end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
-    # ─────────────────────────────────────────────────────────────
-    # mapping ids (USE ONLY schema field)
-    # ─────────────────────────────────────────────────────────────
-    ids: List[int] = []
-    raw_ids = getattr(payload, "activity_type_ids", None) or []
-    if isinstance(raw_ids, list):
-        for x in raw_ids:
-            try:
-                v = int(x)
-                if v > 0:
-                    ids.append(v)
-            except Exception:
-                pass
-    elif isinstance(raw_ids, str):
-        for part in [p.strip() for p in raw_ids.split(",") if p.strip()]:
-            try:
-                v = int(part)
-                if v > 0:
-                    ids.append(v)
-            except Exception:
-                pass
-
-    ids = sorted(set(ids))
-    if not ids:
-        raise HTTPException(status_code=422, detail="Select at least 1 activity type")
-
-    # validate ids exist
-    q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(ids)))
-    existing = {int(r[0]) for r in q.all()}
-    missing = [i for i in ids if i not in existing]
-    if missing:
-        raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
-
-    # ─────────────────────────────────────────────────────────────
-    # Create Event row
-    # ─────────────────────────────────────────────────────────────
+    # Location fields
+    venue_name = getattr(payload, "venue_name", None)
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
+    # ✅ Create event row
     event = Event(
         title=str(payload.title).strip(),
         description=(getattr(payload, "description", None) or None),
         required_photos=int(getattr(payload, "required_photos", 3) or 3),
         is_active=True,
         event_date=event_date,
-        start_time=st,
-        end_time=et,  # ✅ TIME
+        start_time=start_time,
+        end_time=end_time,  # ✅ TIME (not datetime)
         thumbnail_url=getattr(payload, "thumbnail_url", None),
-        venue_name=getattr(payload, "venue_name", None),
+        venue_name=venue_name,
         maps_url=maps_url,
-        location_lat=getattr(payload, "location_lat", None),
-        location_lng=getattr(payload, "location_lng", None),
-        geo_radius_m=getattr(payload, "geo_radius_m", None),
     )
-
     db.add(event)
-    await db.flush()  # gets event.id without commit
+    await db.flush()  # get event.id
 
-    # Insert mapping
+    # ✅ mapping: ONLY use payload.activity_type_ids (schema already coerces)
+    ids = getattr(payload, "activity_type_ids", None)
+    if not isinstance(ids, list):
+        ids = []
+    ids = sorted(set(int(x) for x in ids if x is not None and int(x) > 0))
+
+    if not ids:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
+
+    # ✅ Validate ids exist
+    exist_q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(ids)))
+    existing_ids = {int(r[0]) for r in exist_q.all()}
+    missing = [i for i in ids if i not in existing_ids]
+    if missing:
+        await db.rollback()
+        raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
+
+    # ✅ Insert mapping rows
     for at_id in ids:
-        db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
+        db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
 
     await db.commit()
     await db.refresh(event)
