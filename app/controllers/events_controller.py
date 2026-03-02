@@ -1018,7 +1018,8 @@ async def list_active_events(db: AsyncSession):
         .where(
             Event.event_date.is_not(None),
             Event.is_active.is_(True),
-            Event.start_time.isnot(None),  # Ensuring we don't skip events without start_time
+            # Allow null start_time for filtering purposes
+            Event.start_time.isnot(None) | Event.start_time.is_(None),
         )
         .order_by(
             Event.event_date.desc(),
@@ -1032,12 +1033,15 @@ async def list_active_events(db: AsyncSession):
     for e in events:
         try:
             start_ist, end_ist = _event_window_ist_aware(e)
+            # Only add event if the current time is before the event's end time
             if now_ist <= end_ist:
                 active.append(e)
         except Exception as ex:
-            print(f"Error processing event {e.id}: {str(ex)}")
+            print(f"Error processing event {e.id}: {str(ex)}")  # Log event error
             continue
 
+    # Log number of active events retrieved and processed
+    print(f"Total active events fetched: {len(active)}")
     return active
 
 
