@@ -608,131 +608,57 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 
 async def create_event(db: AsyncSession, payload):
     """
-    ✅ FIXED create_event (for your current DB schema):
-    - Parses event_date (string -> date)
-    - Parses start_time (string -> time)
-    - ✅ Parses end_time (string/datetime -> time)  (FIX: DB column is TIME)
-    - Validates end_time exists and is after start_time
-    - Atomic commit with mapping rows
-    - Blocks empty mapping
+    ✅ PERMANENT FIX create_event (matches your DB schema):
+    - event_date: DATE
+    - start_time: TIME
+    - end_time: TIME  ✅ (NO datetime here)
+    - Requires end_time (prevents NULL windows)
+    - Uses ONLY payload.activity_type_ids for mapping (prevents wrong IDs)
     - Validates activity_type_ids exist
-    - Sync mapping (delete old + insert new) for safety
+    - Inserts mapping rows atomically
     """
 
-    # Debug
-    try:
-        print("=== CREATE EVENT DEBUG ===")
-        if hasattr(payload, "model_dump"):
-            print("Payload dict:", payload.model_dump())
-        elif hasattr(payload, "dict"):
-            print("Payload dict:", payload.dict())
-        else:
-            print("Payload raw:", payload)
-
-        for k in [
-            "activity_type_ids",
-            "activityTypeIds",
-            "activityTypes",
-            "activity_types",
-            "activity_type_id",
-            "activity_list",
-            "event_date",
-            "start_time",
-            "end_time",
-        ]:
-            print(f"{k}:", getattr(payload, k, None))
-        print("==========================")
-    except Exception as e:
-        print("CREATE EVENT DEBUG FAILED:", e)
-
     # ─────────────────────────────────────────────────────────────
-    # Parse event_date
+    # event_date (schema already parses, but keep fallback safe)
     # ─────────────────────────────────────────────────────────────
-    event_date_raw = getattr(payload, "event_date", None) or getattr(payload, "date", None)
-    event_date = _parse_date(event_date_raw)
+    event_date: date_type | None = getattr(payload, "event_date", None) or _parse_date(getattr(payload, "date", None))
     if not event_date:
-        raise HTTPException(status_code=422, detail="event_date is required and must be a valid date")
+        raise HTTPException(status_code=422, detail="event_date is required")
 
     # ─────────────────────────────────────────────────────────────
-    # Parse start_time
+    # start_time (TIME)
     # ─────────────────────────────────────────────────────────────
-    start_time_raw = (
-        getattr(payload, "start_time", None)
-        or getattr(payload, "event_time", None)
-        or getattr(payload, "time", None)
-    )
-    start_time = _parse_time(start_time_raw)
-    if start_time is None:
-        raise HTTPException(status_code=422, detail="start_time is required and must be a valid time like HH:MM")
+    st: time_type | None = getattr(payload, "start_time", None)
+    if st is None:
+        st = _parse_time(getattr(payload, "event_time", None) or getattr(payload, "time", None))
+    if st is None:
+        raise HTTPException(status_code=422, detail="start_time is required (HH:MM)")
 
     # ─────────────────────────────────────────────────────────────
-    # Parse end_time (✅ MUST be TIME to match DB column)
+    # end_time (TIME)  ✅ REQUIRED
     # ─────────────────────────────────────────────────────────────
-    end_time_raw = getattr(payload, "end_time", None)
+    et_raw = getattr(payload, "end_time", None)
 
-    end_time: time_type | None = None
-    if end_time_raw is not None and str(end_time_raw).strip() != "":
-        if isinstance(end_time_raw, datetime):
-            end_time = end_time_raw.time().replace(tzinfo=None)
-        else:
-            end_time = _parse_time(end_time_raw)
+    et: time_type | None = None
+    if isinstance(et_raw, time_type):
+        et = et_raw
+    elif isinstance(et_raw, datetime):
+        et = et_raw.time()
+    elif et_raw is not None and str(et_raw).strip() != "":
+        et = _parse_time(et_raw)
 
-    # ✅ enforce end_time (prevents NULL which breaks window queries/certificates)
-    if end_time is None:
-        raise HTTPException(status_code=422, detail="end_time is required and must be a valid time like HH:MM")
+    if et is None:
+        raise HTTPException(status_code=422, detail="end_time is required (HH:MM)")
 
-    # ✅ sanity: end must be after start (same-day events)
-    if end_time <= start_time:
+    # same-day sanity
+    if et <= st:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
-    venue_name = getattr(payload, "venue_name", None)
-    maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
-
     # ─────────────────────────────────────────────────────────────
-    # Create event row
-    # ─────────────────────────────────────────────────────────────
-    event = Event(
-        title=str(payload.title).strip(),
-        description=(getattr(payload, "description", None) or None),
-        required_photos=int(getattr(payload, "required_photos", 3) or 3),
-        is_active=True,
-        event_date=event_date,
-        start_time=start_time,  # time
-        end_time=end_time,      # ✅ time (FIXED)
-        thumbnail_url=getattr(payload, "thumbnail_url", None),
-        venue_name=venue_name,
-        maps_url=maps_url,
-    )
-    db.add(event)
-    await db.flush()  # ✅ get event.id without committing
-
-    # ─────────────────────────────────────────────────────────────
-    # Robust activity type extraction
+    # mapping ids (USE ONLY schema field)
     # ─────────────────────────────────────────────────────────────
     ids: List[int] = []
-
-    raw_ids = (
-        getattr(payload, "activity_type_ids", None)
-        or getattr(payload, "activityTypeIds", None)
-        or getattr(payload, "activityTypes", None)
-        or getattr(payload, "activity_types", None)
-        or []
-    )
-
-    # list of dicts: [{id: 6, name: ...}, ...]
-    if isinstance(raw_ids, list) and raw_ids and isinstance(raw_ids[0], dict):
-        raw_ids = [x.get("id") for x in raw_ids]
-
-    # single: activity_type_id
-    single = getattr(payload, "activity_type_id", None)
-    if single is not None and (not raw_ids):
-        raw_ids = [single]
-
-    # comma string: "6,7"
-    if isinstance(raw_ids, str):
-        raw_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
-
-    # convert -> ints
+    raw_ids = getattr(payload, "activity_type_ids", None) or []
     if isinstance(raw_ids, list):
         for x in raw_ids:
             try:
@@ -741,41 +667,51 @@ async def create_event(db: AsyncSession, payload):
                     ids.append(v)
             except Exception:
                 pass
-
-    # fallback: map by names if payload.activity_list = ["Energy Conservation", ...]
-    if not ids:
-        names = [
-            str(x).strip()
-            for x in (getattr(payload, "activity_list", None) or [])
-            if str(x).strip()
-        ]
-        if names:
-            rq = await db.execute(select(ActivityType.id).where(ActivityType.name.in_(names)))
-            ids = [int(r[0]) for r in rq.all() if r and r[0] is not None]
+    elif isinstance(raw_ids, str):
+        for part in [p.strip() for p in raw_ids.split(",") if p.strip()]:
+            try:
+                v = int(part)
+                if v > 0:
+                    ids.append(v)
+            except Exception:
+                pass
 
     ids = sorted(set(ids))
-    print("EVENT ID:", event.id, "MAPPED ACTIVITY TYPE IDS (RAW):", ids)
-
     if not ids:
-        await db.rollback()
-        raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
+        raise HTTPException(status_code=422, detail="Select at least 1 activity type")
 
-    # ✅ Validate IDs exist in ActivityType
-    exist_q = await db.execute(select(ActivityType.id, ActivityType.name).where(ActivityType.id.in_(ids)))
-    rows = exist_q.all()
-    existing_ids = {int(r[0]) for r in rows}
-    missing = [i for i in ids if i not in existing_ids]
+    # validate ids exist
+    q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(ids)))
+    existing = {int(r[0]) for r in q.all()}
+    missing = [i for i in ids if i not in existing]
     if missing:
-        await db.rollback()
-        raise HTTPException(
-            status_code=422,
-            detail=f"Invalid activity_type_ids: {missing}. UI is sending wrong IDs.",
-        )
+        raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
 
-    print("✅ Activity types confirmed:", [(int(r[0]), r[1]) for r in rows])
+    # ─────────────────────────────────────────────────────────────
+    # Create Event row
+    # ─────────────────────────────────────────────────────────────
+    maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
-    # ✅ Permanent mapping sync: delete any existing mapping rows then insert
-    await db.execute(delete(EventActivityType).where(EventActivityType.event_id == event.id))
+    event = Event(
+        title=str(payload.title).strip(),
+        description=(getattr(payload, "description", None) or None),
+        required_photos=int(getattr(payload, "required_photos", 3) or 3),
+        is_active=True,
+        event_date=event_date,
+        start_time=st,
+        end_time=et,  # ✅ TIME
+        thumbnail_url=getattr(payload, "thumbnail_url", None),
+        venue_name=getattr(payload, "venue_name", None),
+        maps_url=maps_url,
+        location_lat=getattr(payload, "location_lat", None),
+        location_lng=getattr(payload, "location_lng", None),
+        geo_radius_m=getattr(payload, "geo_radius_m", None),
+    )
+
+    db.add(event)
+    await db.flush()  # gets event.id without commit
+
+    # Insert mapping
     for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
 
