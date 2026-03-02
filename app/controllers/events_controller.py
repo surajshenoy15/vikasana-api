@@ -405,9 +405,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # -----------------------
     q = await db.execute(
         select(EventSubmission).where(
-            EventSubmission.event_id == event.id,
-            func.lower(cast(EventSubmission.status, String)) == "approved",
-        )
+    EventSubmission.event_id == event.id,
+    func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
+)
     )
     submissions = q.scalars().all()
     if not submissions:
