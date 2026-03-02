@@ -118,118 +118,79 @@ def _parse_time(val: Any) -> Optional[time_type]:
     return None
 
 
-# =========================================================
+# # =========================================================
 # ---------------------- TIME HELPERS ----------------------
 # =========================================================
 
-def _now_ist_naive() -> datetime:
-    # IST clock-time, tzinfo removed because Event.end_time is stored as naive
-    return datetime.now(IST).replace(tzinfo=None)
+from __future__ import annotations
+
+from datetime import datetime, timezone, timedelta, time as time_type
+from zoneinfo import ZoneInfo
+from fastapi import HTTPException
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
-def _combine_event_datetime_ist_naive(event_date: date_type, t: time_type) -> datetime:
-    return datetime.combine(event_date, t).replace(tzinfo=None)
+def _now_ist_aware() -> datetime:
+    """Current time in IST (timezone-aware)."""
+    return datetime.now(IST)
 
 
-def _ensure_event_window(event: Event) -> None:
-    now_dt = _now_ist_naive()
-    now_date = now_dt.date()
-    now_time = now_dt.time()
+def _event_window_ist_aware(event) -> tuple[datetime, datetime]:
+    """
+    Build event window as timezone-aware IST datetimes.
 
+    event.event_date: date (required)
+    event.start_time: time | None
+    event.end_time  : time | None
+
+    ✅ Supports cross-midnight windows: if end <= start, end is moved to next day.
+    """
+    if not getattr(event, "event_date", None):
+        raise HTTPException(status_code=400, detail="Event date not configured.")
+
+    start_t: time_type = getattr(event, "start_time", None) or time_type(0, 0)
+    end_t: time_type = getattr(event, "end_time", None) or time_type(23, 59, 59)
+
+    start_ist = datetime.combine(event.event_date, start_t).replace(tzinfo=IST)
+    end_ist = datetime.combine(event.event_date, end_t).replace(tzinfo=IST)
+
+    # ✅ Cross-midnight safety (e.g., 23:00 -> 01:00 next day)
+    if end_ist <= start_ist:
+        end_ist = end_ist + timedelta(days=1)
+
+    return start_ist, end_ist
+
+
+def _event_window_utc(event) -> tuple[datetime, datetime]:
+    """
+    Returns (start_utc, end_utc) as timezone-aware UTC datetimes.
+    ✅ Use these for DB comparisons against timestamptz columns.
+    """
+    start_ist, end_ist = _event_window_ist_aware(event)
+    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+
+def _ensure_event_window(event) -> None:
+    """
+    ✅ Unified window check using the SAME event window logic used for session filtering.
+    Avoids naive datetime bugs and timezone mismatches.
+
+    Raises:
+      403 if event not active / not started / ended
+      400 if window not configured
+    """
     if not getattr(event, "is_active", True):
         raise HTTPException(status_code=403, detail="Event has ended.")
 
-    if not getattr(event, "event_date", None):
-        raise HTTPException(status_code=400, detail="Event date not configured.")
+    start_ist, end_ist = _event_window_ist_aware(event)
+    now_ist = _now_ist_aware()
 
-    if event.event_date != now_date:
-        raise HTTPException(status_code=403, detail="Event is not available today.")
-
-    if getattr(event, "start_time", None) and now_time < event.start_time:
+    if now_ist < start_ist:
         raise HTTPException(status_code=403, detail="Event has not started yet.")
 
-    end_val = getattr(event, "end_time", None)
-    if end_val:
-        if isinstance(end_val, datetime):
-            if now_dt > end_val.replace(tzinfo=None):
-                raise HTTPException(status_code=403, detail="Event has ended.")
-        elif isinstance(end_val, time_type):
-            if now_time > end_val:
-                raise HTTPException(status_code=403, detail="Event has ended.")
-
-
-def _event_window_ist_naive(event: Event) -> tuple[datetime, datetime]:
-    """
-    Returns (start_dt, end_dt) as naive datetime representing IST clock time.
-    end_time is stored as naive datetime in DB (TIMESTAMP WITHOUT TZ).
-    """
-    if not getattr(event, "event_date", None):
-        raise HTTPException(status_code=400, detail="Event date not configured.")
-
-    start_t = getattr(event, "start_time", None) or time_type(0, 0)
-    start_dt = datetime.combine(event.event_date, start_t).replace(tzinfo=None)
-
-    end_val = getattr(event, "end_time", None)
-    if not end_val:
-        end_dt = datetime.combine(event.event_date, time_type(23, 59, 59)).replace(tzinfo=None)
-    else:
-        if isinstance(end_val, datetime):
-            end_dt = end_val.replace(tzinfo=None)
-        elif isinstance(end_val, time_type):
-            end_dt = _combine_event_datetime_ist_naive(event.event_date, end_val)
-        else:
-            end_dt = datetime.combine(event.event_date, time_type(23, 59, 59)).replace(tzinfo=None)
-
-    return start_dt, end_dt
-
-
-def _ist_naive_to_utc_aware(dt_naive_ist: datetime) -> datetime:
-    """
-    Treat dt_naive_ist as IST clock time and convert to UTC aware.
-    Example: 2026-02-28 10:00 (IST naive) -> 2026-02-28 04:30+00:00
-    """
-    return dt_naive_ist.replace(tzinfo=IST).astimezone(timezone.utc)
-
-
-def _event_window_utc(event: Event) -> tuple[datetime, datetime]:
-    start_ist_naive, end_ist_naive = _event_window_ist_naive(event)
-    return _ist_naive_to_utc_aware(start_ist_naive), _ist_naive_to_utc_aware(end_ist_naive)
-
-
-def _event_out_dict(event: Event) -> dict:
-    """
-    ✅ EventOut schema expects end_time as Optional[time].
-    But DB stores end_time as naive datetime.
-    So convert datetime -> time for API response.
-    """
-    end_val = getattr(event, "end_time", None)
-    end_time = end_val.time() if isinstance(end_val, datetime) else end_val
-
-    return {
-        "id": event.id,
-        "title": event.title,
-        "description": event.description,
-        "required_photos": event.required_photos,
-        "is_active": bool(getattr(event, "is_active", True)),
-        "event_date": event.event_date,
-        "start_time": event.start_time,
-        "end_time": end_time,
-        "venue_name": getattr(event, "venue_name", None),
-        "maps_url": getattr(event, "maps_url", None),
-        "thumbnail_url": getattr(event, "thumbnail_url", None),
-    }
-
-async def _sync_event_activity_types(db: AsyncSession, event_id: int, ids: list[int]) -> None:
-    # delete old mappings
-    await db.execute(
-        delete(EventActivityType).where(EventActivityType.event_id == event_id)
-    )
-
-    # insert new mappings
-    for at_id in ids:
-        db.add(EventActivityType(event_id=event_id, activity_type_id=int(at_id)))
-
-    await db.flush()
+    if now_ist > end_ist:
+        raise HTTPException(status_code=403, detail="Event has ended.")
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -415,15 +376,30 @@ async def _infer_activity_type_ids_from_sessions(
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
+
+
+# assumes these are already imported in your file:
+# Event, EventSubmission, ActivitySession, ActivityType, Certificate
+# settings, sign_cert, build_certificate_pdf, upload_certificate_pdf_bytes
+# _event_window_utc, _now_ist_naive, _academic_year_from_date
+# _get_event_activity_type_ids, _infer_activity_type_ids_from_sessions
+# _next_certificate_no
+
+
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ FIXED (ACTUAL BUG FIX):
-    - Your _infer_activity_type_ids_from_sessions(db, start_utc, end_utc) takes 3 args.
-      You were passing 4 args (db, event.id, start_utc, end_utc) -> 500.
-    - Also uses case-insensitive status match for ActivitySession.status ("APPROVED" in DB)
-    - Uses overlapped hours inside [start_utc, end_utc]
-    - Issues cert only when hours > 0
-    - If mapping exists but yields 0, retries with inferred ids
+    ✅ FIXED PERMANENTLY (ACTUAL BUG FIX):
+    - DB stores ActivitySession.status like "APPROVED" (uppercase user-defined enum)
+    - Your code was using ActivitySession.status == ActivitySessionStatus.APPROVED
+      which can mismatch and return 0 rows -> 0 hours -> 0 certificates.
+    - FIX: Use case-insensitive compare: lower(cast(status)) == "approved"
+
+    Also:
+    - Reads approved EventSubmissions
+    - Uses mapped activity_type_ids; if missing -> infer from APPROVED sessions in window
+    - Computes HOURS by overlap: started_at .. min(submitted_at/expires_at, end_utc)
+    - Issues cert only if hours > 0 in that activity type within event window
+    - If mapping exists but yields 0, retries with inferred ids (mapping mismatch safety)
     """
 
     # -----------------------
@@ -443,6 +419,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Event window in UTC
     # -----------------------
     start_utc, end_utc = _event_window_utc(event)
+
+    # safety if old rows have bad end_time
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
@@ -453,8 +431,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
     if not activity_type_ids:
-        # ✅ FIX: call with 3 args only
-        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
+        # ✅ IMPORTANT: pass event.id also (your helper expects it)
+        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
 
     if not activity_type_ids:
         raise HTTPException(
@@ -466,7 +444,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Caches
     # -----------------------
     now_utc = datetime.now(timezone.utc)
-    now_ist = _now_ist_naive()
+    now_ist = _now_ist_aware()
     academic_year = _academic_year_from_date(now_ist)
 
     venue_name = (
@@ -486,9 +464,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     at_by_id = {int(a.id): a for a in ats}
 
     # -----------------------
-    # Helper: overlapped hours in window
+    # Helper: hours overlap (✅ bug fix here)
     # -----------------------
     async def _hours_in_window(student_id: int, at_id: int) -> float:
+        """
+        Sum of overlapped hours inside [start_utc, end_utc] for APPROVED sessions.
+        Uses submitted_at if present else expires_at as session end time.
+        """
         hrs_q = await db.execute(
             select(
                 func.coalesce(
@@ -504,8 +486,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                                     )
                                     - func.greatest(ActivitySession.started_at, start_utc)
                                 ),
-                            )
-                            / 3600.0,
+                            ) / 3600.0,
                         )
                     ),
                     0.0,
@@ -514,9 +495,10 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 ActivitySession.student_id == student_id,
                 ActivitySession.activity_type_id == at_id,
 
-                # ✅ IMPORTANT: DB enum seems uppercase -> compare case-insensitively
+                # ✅ FIX: case-insensitive APPROVED match
                 func.lower(cast(ActivitySession.status, String)) == "approved",
 
+                # must overlap window
                 ActivitySession.started_at <= end_utc,
                 func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at) >= start_utc,
             )
@@ -526,7 +508,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     issued = 0
 
     # -----------------------
-    # Issue certificates
+    # Main issue loop
     # -----------------------
     for sub in submissions:
         student = student_by_id.get(int(sub.student_id))
@@ -607,8 +589,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Mapping mismatch retry
     # -----------------------
     if issued == 0 and mapped_ids:
-        # ✅ FIX: call with 3 args only
-        inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
+        inferred_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
         inferred_ids = sorted({int(i) for i in inferred_ids if i is not None and int(i) > 0})
         inferred_ids = [i for i in inferred_ids if i not in activity_type_ids]
 
@@ -693,6 +674,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     await db.commit()
     return issued
+
 # =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
@@ -783,15 +765,14 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 # ---------------------- ADMIN -----------------------------
 # =========================================================
-
 async def create_event(db: AsyncSession, payload) -> dict:
     """
-    ✅ Permanent FIX create_event:
+    ✅ UPDATED create_event (no _event_out_dict dependency):
     - Uses ONLY payload.activity_type_ids (schema normalizes frontend keys)
     - Requires end_time (TIME) and validates end_time > start_time
     - Validates ActivityType IDs exist
     - Inserts mapping rows atomically (transaction)
-    - Does NOT use activity_list fallback (prevents wrong mapping like [5,13,14])
+    - Returns dict directly (so missing _event_out_dict won't break)
     """
 
     # ─────────────────────────────────────────────
@@ -842,15 +823,12 @@ async def create_event(db: AsyncSession, payload) -> dict:
     # ─────────────────────────────────────────────
     # Create event + mapping atomically
     # ─────────────────────────────────────────────
-    maps_url = (
-        getattr(payload, "maps_url", None)
-        or getattr(payload, "venue_maps_url", None)
-    )
+    maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
     try:
         async with db.begin():  # ✅ atomic transaction
             event = Event(
-                title=str(payload.title).strip(),
+                title=str(getattr(payload, "title", "")).strip(),
                 description=(getattr(payload, "description", None) or None),
                 required_photos=required_photos,
                 is_active=True,
@@ -868,23 +846,40 @@ async def create_event(db: AsyncSession, payload) -> dict:
             await db.flush()  # ✅ event.id available
 
             # ✅ insert mapping rows
-            db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
+            db.add_all(
+                [EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids]
+            )
 
         # outside begin: committed successfully
         await db.refresh(event)
-        out = _event_out_dict(event)
 
-        # optional: helpful for UI/debug
-        out["activity_type_ids"] = ids
+        # ✅ Return dict directly (no _event_out_dict)
+        out = {
+            "id": event.id,
+            "title": event.title,
+            "description": event.description,
+            "required_photos": event.required_photos,
+            "is_active": event.is_active,
+            "event_date": event.event_date,
+            "start_time": event.start_time,
+            "end_time": event.end_time,
+            "thumbnail_url": getattr(event, "thumbnail_url", None),
+            "venue_name": getattr(event, "venue_name", None),
+            "maps_url": getattr(event, "maps_url", None),
+            "location_lat": getattr(event, "location_lat", None),
+            "location_lng": getattr(event, "location_lng", None),
+            "geo_radius_m": getattr(event, "geo_radius_m", None),
+            "activity_type_ids": ids,  # helpful for UI/debug
+        }
         return out
 
     except HTTPException:
         raise
     except Exception as e:
+        # db.begin() rolls back automatically on exception, but keeping this is fine
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
-
-
+    
 async def end_event(db: AsyncSession, event_id: int):
     event = await db.get(Event, event_id)
     if not event:
@@ -979,9 +974,14 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 
 async def list_active_events(db: AsyncSession):
+    now_ist = datetime.now(IST)
+
     q = await db.execute(
         select(Event)
-        .where(Event.event_date.is_not(None))
+        .where(
+            Event.event_date.is_not(None),
+            Event.is_active.is_(True),
+        )
         .order_by(
             Event.event_date.desc(),
             Event.start_time.asc().nulls_last(),
@@ -989,7 +989,17 @@ async def list_active_events(db: AsyncSession):
         )
     )
     events = q.scalars().all()
-    return [_event_out_dict(e) for e in events]
+
+    active: list[Event] = []
+    for e in events:
+        try:
+            start_ist, end_ist = _event_window_ist_aware(e)
+            if now_ist <= end_ist:
+                active.append(e)
+        except Exception:
+            continue
+
+    return active
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
