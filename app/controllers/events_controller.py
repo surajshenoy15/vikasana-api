@@ -258,28 +258,39 @@ async def _eligible_students_from_sessions(
 ) -> list[int]:
     """
     ✅ Students eligible for auto-approval:
-    - Have ActivitySession APPROVED (face verified)
-    - Session.activity_type_id in event's mapped activity_type_ids
-    - Session.started_at within event window (UTC-aware)
-
-    ActivitySession.started_at is usually UTC-aware.
-    So compare against event window converted to UTC-aware.
+    - Have APPROVED ActivitySession (case-insensitive)
+    - Session.activity_type_id in event mapped ids
+    - Session overlaps the event window (not just started_at inside)
+      overlap condition:
+        started_at <= end_utc AND session_end >= start_utc
+      where session_end = coalesce(submitted_at, expires_at, end_utc)
     """
+
     if not activity_type_ids:
         return []
 
     start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
+
+    session_end = func.coalesce(
+        ActivitySession.submitted_at,
+        ActivitySession.expires_at,
+        end_utc,  # ✅ fallback so NULL doesn't break overlap logic
+    )
 
     q = await db.execute(
         select(func.distinct(ActivitySession.student_id)).where(
             func.lower(cast(ActivitySession.status, String)) == "approved",
             ActivitySession.activity_type_id.in_(activity_type_ids),
-            ActivitySession.started_at >= start_utc,
+
+            # ✅ overlap (same as certificate logic)
             ActivitySession.started_at <= end_utc,
+            session_end >= start_utc,
         )
     )
-    return [int(r[0]) for r in q.all() if r and r[0] is not None]
 
+    return [int(r[0]) for r in q.all() if r and r[0] is not None]
 
 async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> dict:
     """
