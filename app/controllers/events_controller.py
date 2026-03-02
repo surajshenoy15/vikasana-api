@@ -1018,6 +1018,7 @@ async def list_active_events(db: AsyncSession):
         .where(
             Event.event_date.is_not(None),
             Event.is_active.is_(True),
+            Event.start_time.isnot(None),  # Ensuring we don't skip events without start_time
         )
         .order_by(
             Event.event_date.desc(),
@@ -1031,14 +1032,12 @@ async def list_active_events(db: AsyncSession):
     for e in events:
         try:
             start_ist, end_ist = _event_window_ist_aware(e)
-            print(f"Checking event {e.id} | {e.title} | start: {start_ist} | end: {end_ist}")  # Debugging line
             if now_ist <= end_ist:
-                print(f"Adding event {e.id} to active events")
                 active.append(e)
         except Exception as ex:
-            print(f"Error processing event {e.id}: {ex}")  # Debugging line
+            print(f"Error processing event {e.id}: {str(ex)}")
+            continue
 
-    print(f"Total active events: {len(active)}")  # Debugging line
     return active
 
 
