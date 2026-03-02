@@ -1009,22 +1009,20 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
-
 async def list_active_events(db: AsyncSession):
     now_ist = datetime.now(IST)
 
     q = await db.execute(
         select(Event)
         .where(
-            Event.event_date.is_not(None),
-            Event.is_active.is_(True),
-            # Allow null start_time for filtering purposes
-            Event.start_time.isnot(None) | Event.start_time.is_(None),
+            Event.event_date.is_not(None),   # Ensure event_date is not NULL
+            Event.is_active.is_(True),       # Only active events
+            Event.start_time.isnot(None)     # Ensure start_time exists (valid)
         )
         .order_by(
-            Event.event_date.desc(),
-            Event.start_time.asc().nulls_last(),
-            Event.id.desc(),
+            Event.event_date.desc(),            # Order by event date
+            Event.start_time.asc().nulls_last(), # Order start time (nulls_last to push nulls last)
+            Event.id.desc()                     # Order by event ID in descending order
         )
     )
     events = q.scalars().all()
@@ -1032,12 +1030,12 @@ async def list_active_events(db: AsyncSession):
     active: list[Event] = []
     for e in events:
         try:
-            start_ist, end_ist = _event_window_ist_aware(e)
-            # Only add event if the current time is before the event's end time
-            if now_ist <= end_ist:
+            # Handle event window time filtering based on event date, start time, and end time
+            start_ist, end_ist = _event_window_ist_aware(e)  # Convert to IST-aware datetime
+            if now_ist <= end_ist:  # Ensure that the current time is within the event's end time
                 active.append(e)
         except Exception as ex:
-            print(f"Error processing event {e.id}: {str(ex)}")  # Log event error
+            print(f"Error processing event {e.id}: {str(ex)}")
             continue
 
     # Log number of active events retrieved and processed
