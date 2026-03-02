@@ -1010,7 +1010,7 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # ---------------------- STUDENT ---------------------------
 # =========================================================
 async def list_active_events(db: AsyncSession) -> list[Event]:
-    now_ist = datetime.now(IST)  # Current time in IST
+    now_ist = datetime.now(IST)  # Current time in IST (Indian Standard Time)
     try:
         q = await db.execute(
             select(Event)
@@ -1018,6 +1018,7 @@ async def list_active_events(db: AsyncSession) -> list[Event]:
             .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
         )
         events = q.scalars().all()
+        print("Fetched Events: ", events)  # Add this to verify if events are fetched correctly.
         active_events = []
 
         # Loop through fetched events to check if they are ongoing
@@ -1028,7 +1029,9 @@ async def list_active_events(db: AsyncSession) -> list[Event]:
             if start_ist <= now_ist <= end_ist:
                 active_events.append(event)
 
+        print("Active Events: ", active_events)  # Log the active events being returned.
         return active_events
+
     except Exception as e:
         print(f"Error fetching active events: {str(e)}")
         return []
