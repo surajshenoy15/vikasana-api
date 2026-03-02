@@ -1011,36 +1011,30 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 async def list_active_events(db: AsyncSession):
     now_ist = datetime.now(IST)
-
-    q = await db.execute(
-        select(Event)
-        .where(
-            Event.event_date.is_not(None),   # Ensure event_date is not NULL
-            Event.is_active.is_(True),       # Only active events
-            Event.start_time.isnot(None)     # Ensure start_time exists (valid)
+    try:
+        q = await db.execute(
+            select(Event)
+            .where(Event.event_date.isnot(None))  # Ensure event date exists
+            .order_by(
+                Event.event_date.desc(),
+                Event.start_time.asc().nulls_last(),
+                Event.id.desc()
+            )
         )
-        .order_by(
-            Event.event_date.desc(),            # Order by event date
-            Event.start_time.asc().nulls_last(), # Order start time (nulls_last to push nulls last)
-            Event.id.desc()                     # Order by event ID in descending order
-        )
-    )
-    events = q.scalars().all()
-
-    active: list[Event] = []
-    for e in events:
-        try:
-            # Handle event window time filtering based on event date, start time, and end time
-            start_ist, end_ist = _event_window_ist_aware(e)  # Convert to IST-aware datetime
-            if now_ist <= end_ist:  # Ensure that the current time is within the event's end time
+        events = q.scalars().all()
+        print(f"All events fetched: {len(events)}")  # Log all events fetched
+        active: list[Event] = []
+        for e in events:
+            print(f"Processing event: {e.id}, Start Time: {e.start_time}, End Time: {e.end_time}")
+            # Check event window validity
+            start_ist, end_ist = _event_window_ist_aware(e)
+            if now_ist <= end_ist:
                 active.append(e)
-        except Exception as ex:
-            print(f"Error processing event {e.id}: {str(ex)}")
-            continue
-
-    # Log number of active events retrieved and processed
-    print(f"Total active events fetched: {len(active)}")
-    return active
+        print(f"Total active events fetched: {len(active)}")  # Log the active events count
+        return active
+    except Exception as e:
+        print(f"Error fetching events: {str(e)}")
+        return []
 
 
 async def register_for_event(db: AsyncSession, student_id: int, event_id: int):
