@@ -284,34 +284,48 @@ async def _eligible_students_from_sessions(
 async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> dict:
     """
     ✅ MAIN BUTTON LOGIC (Top approve):
-    - Finds students with APPROVED face sessions within event window
-    - Upserts EventSubmission => status=approved, sets submitted_at+approved_at
+    - Finds students with APPROVED sessions within event window for mapped activity types
+    - Upserts EventSubmission => status="approved", sets submitted_at + approved_at
     - Generates certificates for them
+
+    ✅ FIXES:
+    - ActivitySession.status matched case-insensitively (handles "APPROVED" enum/string)
+    - Treats expired/pending submissions as re-approvable if student is eligible
+    - Uses consistent UTC window logic
     """
+
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # Event window
+    start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
+
     # ✅ Try mapped activity types first
-    activity_type_ids = await _get_event_activity_type_ids(db, event_id)
+    mapped_ids = await _get_event_activity_type_ids(db, event_id)
+    activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
     # ✅ FALLBACK: infer activity types from APPROVED sessions inside event window
     if not activity_type_ids:
-        start_utc, end_utc = _event_window_utc(event)
         aq = await db.execute(
             select(func.distinct(ActivitySession.activity_type_id)).where(
-                ActivitySession.status == ActivitySessionStatus.APPROVED,
+                func.lower(cast(ActivitySession.status, String)) == "approved",
                 ActivitySession.started_at >= start_utc,
                 ActivitySession.started_at <= end_utc,
                 ActivitySession.activity_type_id.is_not(None),
             )
         )
-        activity_type_ids = [int(r[0]) for r in aq.all() if r and r[0] is not None]
+        activity_type_ids = sorted({int(r[0]) for r in aq.all() if r and r[0] is not None})
 
     if not activity_type_ids:
         return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
 
+    # ✅ Get eligible students (make sure helper uses same case-insensitive status logic)
     eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
+    eligible_student_ids = sorted({int(x) for x in (eligible_student_ids or []) if x is not None})
+
     if not eligible_student_ids:
         return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
 
@@ -336,9 +350,10 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
             db.add(sub)
             submissions_approved += 1
         else:
-            if sub.status != "approved":
+            # ✅ normalize: anything that's not already approved -> approve it (expired/pending/rejected/etc.)
+            if (sub.status or "").lower() != "approved":
                 sub.status = "approved"
-                if hasattr(sub, "submitted_at") and sub.submitted_at is None:
+                if hasattr(sub, "submitted_at") and getattr(sub, "submitted_at", None) is None:
                     sub.submitted_at = now_utc
                 if hasattr(sub, "approved_at"):
                     sub.approved_at = now_utc
@@ -346,6 +361,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
     await db.commit()
 
+    # ✅ Issue certificates for approved submissions
     issued = await _issue_certificates_for_event(db, event)
 
     return {
