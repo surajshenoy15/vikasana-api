@@ -700,12 +700,11 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
     return out
 
 
+from datetime import datetime, timezone, timedelta
+from fastapi import HTTPException
+from sqlalchemy import select, func
+
 async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
-    """
-    - Only allow when event is ENDED (is_active=False)
-    - Auto-approve submissions from APPROVED face sessions
-    - Then generate certificates for all approved submissions
-    """
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
@@ -713,19 +712,88 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict
     if bool(getattr(event, "is_active", True)):
         raise HTTPException(status_code=400, detail="End the event first, then generate certificates")
 
+    # event window
+    start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
+
+    # mapping ids
+    mapped_ids = await _get_event_activity_type_ids(db, event_id)
+    mapped_ids = sorted(set(int(x) for x in mapped_ids if x is not None))
+
+    # count sessions in window for mapped ids
+    mapped_sessions_count = 0
+    if mapped_ids:
+        sq = await db.execute(
+            select(func.count(ActivitySession.id)).where(
+                ActivitySession.status == ActivitySessionStatus.APPROVED,
+                ActivitySession.activity_type_id.in_(mapped_ids),
+                ActivitySession.started_at >= start_utc,
+                ActivitySession.started_at <= end_utc,
+            )
+        )
+        mapped_sessions_count = int(sq.scalar() or 0)
+
+    # count total approved sessions in window (any activity type)
+    tq = await db.execute(
+        select(func.count(ActivitySession.id)).where(
+            ActivitySession.status == ActivitySessionStatus.APPROVED,
+            ActivitySession.started_at >= start_utc,
+            ActivitySession.started_at <= end_utc,
+        )
+    )
+    total_sessions_in_window = int(tq.scalar() or 0)
+
+    # count approved submissions before auto-approve
+    bq = await db.execute(
+        select(func.count(EventSubmission.id)).where(
+            EventSubmission.event_id == event_id,
+            func.lower(func.cast(EventSubmission.status, String)) == "approved",
+        )
+    )
+    approved_before = int(bq.scalar() or 0)
+
+    # step 1: auto-approve submissions
     result = await auto_approve_event_from_sessions(db, event_id)
 
-    if int(result.get("certificates_issued", 0)) == 0:
+    # count approved submissions after auto-approve
+    aq = await db.execute(
+        select(func.count(EventSubmission.id)).where(
+            EventSubmission.event_id == event_id,
+            func.lower(func.cast(EventSubmission.status, String)) == "approved",
+        )
+    )
+    approved_after = int(aq.scalar() or 0)
+
+    # step 2: actually issue
+    issued = await _issue_certificates_for_event(db, event)
+
+    if int(issued) == 0:
         raise HTTPException(
             status_code=400,
-            detail="No certificates generated. Ensure face-approved sessions exist within the event time window and activity type mapping is set.",
+            detail={
+                "message": "No certificates generated",
+                "event_id": event_id,
+                "event_is_active": bool(getattr(event, "is_active", True)),
+                "event_date": str(getattr(event, "event_date", None)),
+                "start_time": str(getattr(event, "start_time", None)),
+                "end_time": str(getattr(event, "end_time", None)),
+                "window_utc": {"start_utc": start_utc.isoformat(), "end_utc": end_utc.isoformat()},
+                "mapped_activity_type_ids": mapped_ids,
+                "mapped_sessions_in_window": mapped_sessions_count,
+                "total_approved_sessions_in_window_any_type": total_sessions_in_window,
+                "approved_submissions_before": approved_before,
+                "approved_submissions_after": approved_after,
+                "auto_approve_result": result,
+                "hint": "If mapped_sessions_in_window=0 but total_approved_sessions_in_window_any_type>0 then your mapping IDs do not match the session activity_type_id values.",
+            },
         )
 
     return {
         "event_id": event_id,
         "eligible_students": result.get("eligible_students", 0),
         "submissions_approved": result.get("submissions_approved", 0),
-        "certificates_issued": result.get("certificates_issued", 0),
+        "certificates_issued": int(issued),
     }
 
 
