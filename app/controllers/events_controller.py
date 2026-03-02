@@ -122,7 +122,7 @@ def _parse_time(val: Any) -> Optional[time_type]:
 # ---------------------- TIME HELPERS ----------------------
 # =========================================================
 
-from __future__ import annotations
+
 
 from datetime import datetime, timezone, timedelta, time as time_type
 from zoneinfo import ZoneInfo
