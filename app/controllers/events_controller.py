@@ -402,18 +402,18 @@ async def _infer_activity_type_ids_from_sessions(
     end_utc: datetime,
 ) -> list[int]:
     """
-    Fallback: infer activity types from APPROVED sessions within event window.
+    Infer activity_type_ids from APPROVED sessions inside the event time window.
+    NOTE: ActivitySession has NO event_id column in your schema.
     """
-    iq = await db.execute(
+
+    q = await db.execute(
         select(func.distinct(ActivitySession.activity_type_id)).where(
-            ActivitySession.event_id == event_id,  # if you DON'T have event_id in sessions, remove this line
             ActivitySession.status == ActivitySessionStatus.APPROVED,
             ActivitySession.started_at >= start_utc,
             ActivitySession.started_at <= end_utc,
-            ActivitySession.activity_type_id.isnot(None),
         )
     )
-    ids = [int(r[0]) for r in iq.all() if r and r[0] is not None]
+    ids = [int(r[0]) for r in q.all() if r and r[0] is not None]
     return sorted(set(ids))
 
 
