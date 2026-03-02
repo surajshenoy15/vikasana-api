@@ -35,7 +35,7 @@ class Event(Base):
     # IMPORTANT:
     # This is TIMESTAMP WITHOUT TIME ZONE in Postgres by default.
     # So we store NAIVE datetime in controllers.
-    end_time = Column(DateTime, nullable=True)
+    end_time = Column(Time, nullable=True)
 
     # ✅ Location fields (existing)
     venue_name = Column(String(255), nullable=True)
