@@ -388,17 +388,15 @@ async def _infer_activity_type_ids_from_sessions(
 
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ FIXED PERMANENTLY (ACTUAL BUG FIX):
-    - DB stores ActivitySession.status like "APPROVED" (uppercase user-defined enum)
-    - Your code was using ActivitySession.status == ActivitySessionStatus.APPROVED
-      which can mismatch and return 0 rows -> 0 hours -> 0 certificates.
-    - FIX: Use case-insensitive compare: lower(cast(status)) == "approved"
-
-    Also:
-    - Reads approved EventSubmissions
+    ✅ FIXED PERMANENTLY:
+    - EventSubmission.status + ActivitySession.status are matched case-insensitively
+      (handles DB enums stored as "APPROVED" etc.)
     - Uses mapped activity_type_ids; if missing -> infer from APPROVED sessions in window
-    - Computes HOURS by overlap: started_at .. min(submitted_at/expires_at, end_utc)
-    - Issues cert only if hours > 0 in that activity type within event window
+    - Computes HOURS by overlap inside event window:
+        overlap = max(0, min(session_end, end_utc) - max(started_at, start_utc))
+      where session_end = coalesce(submitted_at, expires_at, end_utc)  ✅ IMPORTANT FIX
+      (prevents NULL end timestamps from producing 0 rows / 0 hours)
+    - Issues certificate only if hours > 0 for that student + activity_type in window
     - If mapping exists but yields 0, retries with inferred ids (mapping mismatch safety)
     """
 
@@ -420,7 +418,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # -----------------------
     start_utc, end_utc = _event_window_utc(event)
 
-    # safety if old rows have bad end_time
+    # Safety if old rows have bad end_time
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
@@ -431,7 +429,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
     if not activity_type_ids:
-        # ✅ IMPORTANT: pass event.id also (your helper expects it)
         activity_type_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
 
     if not activity_type_ids:
@@ -464,13 +461,23 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     at_by_id = {int(a.id): a for a in ats}
 
     # -----------------------
-    # Helper: hours overlap (✅ bug fix here)
+    # Helper: hours overlap
     # -----------------------
     async def _hours_in_window(student_id: int, at_id: int) -> float:
         """
-        Sum of overlapped hours inside [start_utc, end_utc] for APPROVED sessions.
-        Uses submitted_at if present else expires_at as session end time.
+        Sum overlapped hours inside [start_utc, end_utc] for APPROVED sessions.
+
+        ✅ IMPORTANT:
+        Some rows may have submitted_at/expires_at NULL even when APPROVED.
+        If we don't fallback, the filter `end >= start_utc` becomes NULL and kills the match.
+        So session_end = coalesce(submitted_at, expires_at, end_utc).
         """
+        session_end = func.coalesce(
+            ActivitySession.submitted_at,
+            ActivitySession.expires_at,
+            end_utc,  # ✅ fallback prevents NULL end from breaking overlap logic
+        )
+
         hrs_q = await db.execute(
             select(
                 func.coalesce(
@@ -480,13 +487,11 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                             func.extract(
                                 "epoch",
                                 (
-                                    func.least(
-                                        func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at),
-                                        end_utc,
-                                    )
+                                    func.least(session_end, end_utc)
                                     - func.greatest(ActivitySession.started_at, start_utc)
                                 ),
-                            ) / 3600.0,
+                            )
+                            / 3600.0,
                         )
                     ),
                     0.0,
@@ -498,19 +503,22 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 # ✅ FIX: case-insensitive APPROVED match
                 func.lower(cast(ActivitySession.status, String)) == "approved",
 
-                # must overlap window
+                # ✅ must overlap window (use same session_end)
                 ActivitySession.started_at <= end_utc,
-                func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at) >= start_utc,
+                session_end >= start_utc,
             )
         )
         return float(hrs_q.scalar() or 0.0)
 
-    issued = 0
-
     # -----------------------
     # Main issue loop
     # -----------------------
+    issued = 0
+
     for sub in submissions:
+        if sub.student_id is None:
+            continue
+
         student = student_by_id.get(int(sub.student_id))
         if not student:
             continue
@@ -536,14 +544,14 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 continue
 
             at = at_by_id.get(at_id)
-            activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
+            activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
 
             # points
             points_awarded = 0
             if at:
                 ppu = getattr(at, "points_per_unit", None)
                 hpu = getattr(at, "hours_per_unit", None)
-                if ppu is not None and hpu and hours > 0:
+                if ppu is not None and hpu:
                     try:
                         points_awarded = int(round((hours / float(hpu)) * float(ppu)))
                     except Exception:
@@ -595,11 +603,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
         if inferred_ids:
             at_q2 = await db.execute(select(ActivityType).where(ActivityType.id.in_(inferred_ids)))
-            ats2 = at_q2.scalars().all()
-            for a in ats2:
+            for a in at_q2.scalars().all():
                 at_by_id[int(a.id)] = a
 
             for sub in submissions:
+                if sub.student_id is None:
+                    continue
+
                 student = student_by_id.get(int(sub.student_id))
                 if not student:
                     continue
@@ -624,13 +634,13 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                         continue
 
                     at = at_by_id.get(at_id)
-                    activity_type_name = ((getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}")
+                    activity_type_name = (getattr(at, "name", None) or "").strip() or f"Activity Type #{at_id}"
 
                     points_awarded = 0
                     if at:
                         ppu = getattr(at, "points_per_unit", None)
                         hpu = getattr(at, "hours_per_unit", None)
-                        if ppu is not None and hpu and hours > 0:
+                        if ppu is not None and hpu:
                             try:
                                 points_awarded = int(round((hours / float(hpu)) * float(ppu)))
                             except Exception:
