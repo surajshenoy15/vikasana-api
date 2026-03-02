@@ -751,27 +751,25 @@ async def list_student_event_certificates(db: AsyncSession, student_id: int, eve
     return out
 
 
-from datetime import datetime, timezone, timedelta
-from fastapi import HTTPException
-from sqlalchemy import select, func
-
-async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict:
-    """
-    - Only allow when event is ENDED (is_active=False)
-    - Auto-approve submissions from APPROVED face sessions
-    - Then generate certificates for all approved submissions
-    """
+async def regenerate_event_certificates(db: AsyncSession, event_id: int):
     event = await db.get(Event, event_id)
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if bool(getattr(event, "is_active", True)):
-        raise HTTPException(status_code=400, detail="End the event first, then generate certificates")
+    # ✅ Optional: only delete for approved/expired submissions (safer)
+    subq = await db.execute(
+        select(EventSubmission.id).where(
+            EventSubmission.event_id == event_id,
+            func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
+        )
+    )
+    sub_ids = [int(x) for x in subq.scalars().all()]
 
-    # 1) auto-approve (may approve 0 if already approved)
-    auto = await auto_approve_event_from_sessions(db, event_id)
+    if sub_ids:
+        await db.execute(sql_delete(Certificate).where(Certificate.submission_id.in_(sub_ids)))
+        await db.commit()
 
-    # 2) IMPORTANT: issue certificates based on approved submissions
+    # ✅ re-issue
     issued = await _issue_certificates_for_event(db, event)
 
     if issued == 0:
@@ -780,12 +778,7 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int) -> dict
             detail="No certificates generated. Ensure approved submissions exist and approved sessions exist within the event window for the mapped activity types.",
         )
 
-    return {
-        "event_id": event_id,
-        "eligible_students": auto.get("eligible_students", 0),
-        "submissions_approved": auto.get("submissions_approved", 0),
-        "certificates_issued": issued,
-    }
+    return {"event_id": event_id, "certificates_issued": issued}
 
 # =========================================================
 # ---------------------- THUMBNAIL -------------------------
