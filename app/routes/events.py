@@ -177,7 +177,7 @@ async def admin_update_event_api(
 
     ev.event_date = payload.event_date
     ev.start_time = payload.start_time
-    ev.end_time = _as_naive_datetime_for_end_time(payload.event_date, payload.end_time)
+    ev.end_time = payload.end_time
 
     ev.thumbnail_url = payload.thumbnail_url
     ev.venue_name = (payload.venue_name or "").strip() or None
