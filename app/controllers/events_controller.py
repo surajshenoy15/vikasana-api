@@ -415,36 +415,15 @@ async def _infer_activity_type_ids_from_sessions(
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
-from datetime import datetime, timezone, timedelta
-from typing import List
-from urllib.parse import quote
-
-from fastapi import HTTPException
-from sqlalchemy import select, func, cast, String
-from sqlalchemy.ext.asyncio import AsyncSession
-
-# assumes these are already imported in your file:
-# Event, EventSubmission, ActivitySession, ActivityType, Certificate
-# settings, sign_cert, build_certificate_pdf, upload_certificate_pdf_bytes
-# _event_window_utc, _now_ist_naive, _academic_year_from_date
-# _get_event_activity_type_ids, _infer_activity_type_ids_from_sessions
-# _next_certificate_no
-
-
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
-    ✅ FIXED PERMANENTLY (ACTUAL BUG FIX):
-    - DB stores ActivitySession.status like "APPROVED" (uppercase user-defined enum)
-    - Your code was using ActivitySession.status == ActivitySessionStatus.APPROVED
-      which can mismatch and return 0 rows -> 0 hours -> 0 certificates.
-    - FIX: Use case-insensitive compare: lower(cast(status)) == "approved"
-
-    Also:
-    - Reads approved EventSubmissions
-    - Uses mapped activity_type_ids; if missing -> infer from APPROVED sessions in window
-    - Computes HOURS by overlap: started_at .. min(submitted_at/expires_at, end_utc)
-    - Issues cert only if hours > 0 in that activity type within event window
-    - If mapping exists but yields 0, retries with inferred ids (mapping mismatch safety)
+    ✅ FIXED (ACTUAL BUG FIX):
+    - Your _infer_activity_type_ids_from_sessions(db, start_utc, end_utc) takes 3 args.
+      You were passing 4 args (db, event.id, start_utc, end_utc) -> 500.
+    - Also uses case-insensitive status match for ActivitySession.status ("APPROVED" in DB)
+    - Uses overlapped hours inside [start_utc, end_utc]
+    - Issues cert only when hours > 0
+    - If mapping exists but yields 0, retries with inferred ids
     """
 
     # -----------------------
@@ -464,8 +443,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Event window in UTC
     # -----------------------
     start_utc, end_utc = _event_window_utc(event)
-
-    # safety if old rows have bad end_time
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
 
@@ -476,8 +453,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
     if not activity_type_ids:
-        # ✅ IMPORTANT: pass event.id also (your helper expects it)
-        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
+        # ✅ FIX: call with 3 args only
+        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
 
     if not activity_type_ids:
         raise HTTPException(
@@ -509,13 +486,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     at_by_id = {int(a.id): a for a in ats}
 
     # -----------------------
-    # Helper: hours overlap (✅ bug fix here)
+    # Helper: overlapped hours in window
     # -----------------------
     async def _hours_in_window(student_id: int, at_id: int) -> float:
-        """
-        Sum of overlapped hours inside [start_utc, end_utc] for APPROVED sessions.
-        Uses submitted_at if present else expires_at as session end time.
-        """
         hrs_q = await db.execute(
             select(
                 func.coalesce(
@@ -531,7 +504,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                                     )
                                     - func.greatest(ActivitySession.started_at, start_utc)
                                 ),
-                            ) / 3600.0,
+                            )
+                            / 3600.0,
                         )
                     ),
                     0.0,
@@ -540,10 +514,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
                 ActivitySession.student_id == student_id,
                 ActivitySession.activity_type_id == at_id,
 
-                # ✅ FIX: case-insensitive APPROVED match
+                # ✅ IMPORTANT: DB enum seems uppercase -> compare case-insensitively
                 func.lower(cast(ActivitySession.status, String)) == "approved",
 
-                # must overlap window
                 ActivitySession.started_at <= end_utc,
                 func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at) >= start_utc,
             )
@@ -553,7 +526,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     issued = 0
 
     # -----------------------
-    # Main issue loop
+    # Issue certificates
     # -----------------------
     for sub in submissions:
         student = student_by_id.get(int(sub.student_id))
@@ -634,7 +607,8 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Mapping mismatch retry
     # -----------------------
     if issued == 0 and mapped_ids:
-        inferred_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
+        # ✅ FIX: call with 3 args only
+        inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
         inferred_ids = sorted({int(i) for i in inferred_ids if i is not None and int(i) > 0})
         inferred_ids = [i for i in inferred_ids if i not in activity_type_ids]
 
@@ -719,7 +693,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
 
     await db.commit()
     return issued
-
 # =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
