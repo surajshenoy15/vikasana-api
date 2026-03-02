@@ -819,22 +819,26 @@ async def create_event(db: AsyncSession, payload) -> dict:
     - Uses ONLY payload.activity_type_ids (schema normalizes frontend keys)
     - Requires end_time (TIME) and validates end_time > start_time
     - Validates ActivityType IDs exist
-    - Inserts mapping rows atomically
+    - Inserts mapping rows atomically (transaction)
     - Does NOT use activity_list fallback (prevents wrong mapping like [5,13,14])
     """
 
     # ─────────────────────────────────────────────
     # Parse date/time
     # ─────────────────────────────────────────────
-    event_date = _parse_date(getattr(payload, "event_date", None) or getattr(payload, "date", None))
+    event_date: date_type | None = _parse_date(
+        getattr(payload, "event_date", None) or getattr(payload, "date", None)
+    )
     if not event_date:
         raise HTTPException(status_code=422, detail="event_date is required")
 
-    start_time = _parse_time(getattr(payload, "start_time", None) or getattr(payload, "time", None))
+    start_time: time_type | None = _parse_time(
+        getattr(payload, "start_time", None) or getattr(payload, "time", None)
+    )
     if start_time is None:
         raise HTTPException(status_code=422, detail="start_time is required (HH:MM)")
 
-    end_time = _parse_time(getattr(payload, "end_time", None))
+    end_time: time_type | None = _parse_time(getattr(payload, "end_time", None))
     if end_time is None:
         raise HTTPException(status_code=422, detail="end_time is required (HH:MM)")
 
@@ -842,17 +846,24 @@ async def create_event(db: AsyncSession, payload) -> dict:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     # ─────────────────────────────────────────────
+    # required_photos safety
+    # ─────────────────────────────────────────────
+    required_photos = int(getattr(payload, "required_photos", 3) or 3)
+    if required_photos < 3 or required_photos > 5:
+        raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
+
+    # ─────────────────────────────────────────────
     # Activity type ids (ONLY from schema)
     # ─────────────────────────────────────────────
-    ids: List[int] = getattr(payload, "activity_type_ids", None) or []
+    ids: List[int] = list(getattr(payload, "activity_type_ids", None) or [])
     ids = sorted({int(x) for x in ids if x is not None and int(x) > 0})
 
     if not ids:
         raise HTTPException(status_code=422, detail="Please select at least 1 activity type")
 
-    # Validate IDs exist
+    # Validate IDs exist in ActivityType
     q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(ids)))
-    existing = {int(x[0]) for x in q.all()}
+    existing = {int(r[0]) for r in q.all()}
     missing = [i for i in ids if i not in existing]
     if missing:
         raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
@@ -860,37 +871,47 @@ async def create_event(db: AsyncSession, payload) -> dict:
     # ─────────────────────────────────────────────
     # Create event + mapping atomically
     # ─────────────────────────────────────────────
+    maps_url = (
+        getattr(payload, "maps_url", None)
+        or getattr(payload, "venue_maps_url", None)
+    )
+
     try:
-        event = Event(
-            title=str(payload.title).strip(),
-            description=(getattr(payload, "description", None) or None),
-            required_photos=int(getattr(payload, "required_photos", 3) or 3),
-            is_active=True,
-            event_date=event_date,
-            start_time=start_time,
-            end_time=end_time,  # ✅ TIME column
-            thumbnail_url=getattr(payload, "thumbnail_url", None),
-            venue_name=getattr(payload, "venue_name", None),
-            maps_url=getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None),
-            location_lat=getattr(payload, "location_lat", None),
-            location_lng=getattr(payload, "location_lng", None),
-            geo_radius_m=getattr(payload, "geo_radius_m", None),
-        )
+        async with db.begin():  # ✅ atomic transaction
+            event = Event(
+                title=str(payload.title).strip(),
+                description=(getattr(payload, "description", None) or None),
+                required_photos=required_photos,
+                is_active=True,
+                event_date=event_date,
+                start_time=start_time,
+                end_time=end_time,  # ✅ TIME column
+                thumbnail_url=getattr(payload, "thumbnail_url", None),
+                venue_name=getattr(payload, "venue_name", None),
+                maps_url=maps_url,
+                location_lat=getattr(payload, "location_lat", None),
+                location_lng=getattr(payload, "location_lng", None),
+                geo_radius_m=getattr(payload, "geo_radius_m", None),
+            )
+            db.add(event)
+            await db.flush()  # ✅ event.id available
 
-        db.add(event)
-        await db.flush()  # get event.id
+            # ✅ insert mapping rows
+            db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
 
-        # ✅ Insert mapping rows
-        for at_id in ids:
-            db.add(EventActivityType(event_id=event.id, activity_type_id=at_id))
-
-        await db.commit()
+        # outside begin: committed successfully
         await db.refresh(event)
-        return _event_out_dict(event)
+        out = _event_out_dict(event)
 
-    except Exception:
-        await db.rollback()
+        # optional: helpful for UI/debug
+        out["activity_type_ids"] = ids
+        return out
+
+    except HTTPException:
         raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
 
 
 async def end_event(db: AsyncSession, event_id: int):
