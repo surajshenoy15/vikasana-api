@@ -429,7 +429,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
     if not activity_type_ids:
-        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
+        activity_type_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
 
     if not activity_type_ids:
         raise HTTPException(
@@ -597,7 +597,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Mapping mismatch retry
     # -----------------------
     if issued == 0 and mapped_ids:
-        inferred_ids = await _infer_activity_type_ids_from_sessions(db, event.id, start_utc, end_utc)
+        inferred_ids = await _infer_activity_type_ids_from_sessions(db, start_utc, end_utc)
         inferred_ids = sorted({int(i) for i in inferred_ids if i is not None and int(i) > 0})
         inferred_ids = [i for i in inferred_ids if i not in activity_type_ids]
 
