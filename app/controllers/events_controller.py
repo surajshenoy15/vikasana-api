@@ -1031,11 +1031,14 @@ async def list_active_events(db: AsyncSession):
     for e in events:
         try:
             start_ist, end_ist = _event_window_ist_aware(e)
+            print(f"Checking event {e.id} | {e.title} | start: {start_ist} | end: {end_ist}")  # Debugging line
             if now_ist <= end_ist:
+                print(f"Adding event {e.id} to active events")
                 active.append(e)
-        except Exception:
-            continue
+        except Exception as ex:
+            print(f"Error processing event {e.id}: {ex}")  # Debugging line
 
+    print(f"Total active events: {len(active)}")  # Debugging line
     return active
 
 
