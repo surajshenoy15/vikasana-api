@@ -1,4 +1,3 @@
-# app/routes/events.py  ✅ FULL UPDATED (event photos + gps + clean fix)
 from __future__ import annotations
 
 from typing import List
@@ -130,7 +129,7 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 
 # =========================================================
-# ---------------------- ADMIN -----------------------------
+# ---------------------- ADMIN ----------------------------- 
 # =========================================================
 
 @router.post("/admin/events", response_model=EventOut)
@@ -248,7 +247,7 @@ async def admin_list_events_api(
 
 
 # =========================================================
-# ---------------------- STUDENT ---------------------------
+# ---------------------- STUDENT --------------------------- 
 # =========================================================
 
 @router.get("/student/events", response_model=list[EventOut])
