@@ -1,6 +1,6 @@
 # app/controllers/events_controller.py
 from __future__ import annotations
-
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, date as date_type, time as time_type, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
@@ -797,12 +797,12 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 async def create_event(db: AsyncSession, payload) -> dict:
     """
-    ✅ UPDATED create_event (no _event_out_dict dependency):
-    - Uses ONLY payload.activity_type_ids (schema normalizes frontend keys)
-    - Requires end_time (TIME) and validates end_time > start_time
+    ✅ FIXED create_event (no nested transaction bug):
+    - NO `async with db.begin()` (prevents "transaction already begun" when get_db() already begins)
+    - Validates date/time + end_time > start_time
     - Validates ActivityType IDs exist
-    - Inserts mapping rows atomically (transaction)
-    - Returns dict directly (so missing _event_out_dict won't break)
+    - Inserts Event + mappings atomically with ONE commit
+    - Returns dict directly
     """
 
     # ─────────────────────────────────────────────
@@ -839,52 +839,45 @@ async def create_event(db: AsyncSession, payload) -> dict:
     # ─────────────────────────────────────────────
     ids: List[int] = list(getattr(payload, "activity_type_ids", None) or [])
     ids = sorted({int(x) for x in ids if x is not None and int(x) > 0})
-
     if not ids:
         raise HTTPException(status_code=422, detail="Please select at least 1 activity type")
 
-    # Validate IDs exist in ActivityType
     q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(ids)))
     existing = {int(r[0]) for r in q.all()}
     missing = [i for i in ids if i not in existing]
     if missing:
         raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
 
-    # ─────────────────────────────────────────────
-    # Create event + mapping atomically
-    # ─────────────────────────────────────────────
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
+    # ─────────────────────────────────────────────
+    # Create event + mapping in ONE transaction (manual commit)
+    # ─────────────────────────────────────────────
     try:
-        async with db.begin():  # ✅ atomic transaction
-            event = Event(
-                title=str(getattr(payload, "title", "")).strip(),
-                description=(getattr(payload, "description", None) or None),
-                required_photos=required_photos,
-                is_active=True,
-                event_date=event_date,
-                start_time=start_time,
-                end_time=end_time,  # ✅ TIME column
-                thumbnail_url=getattr(payload, "thumbnail_url", None),
-                venue_name=getattr(payload, "venue_name", None),
-                maps_url=maps_url,
-                location_lat=getattr(payload, "location_lat", None),
-                location_lng=getattr(payload, "location_lng", None),
-                geo_radius_m=getattr(payload, "geo_radius_m", None),
-            )
-            db.add(event)
-            await db.flush()  # ✅ event.id available
+        event = Event(
+            title=str(getattr(payload, "title", "")).strip(),
+            description=(getattr(payload, "description", None) or None),
+            required_photos=required_photos,
+            is_active=True,
+            event_date=event_date,
+            start_time=start_time,
+            end_time=end_time,
+            thumbnail_url=getattr(payload, "thumbnail_url", None),
+            venue_name=getattr(payload, "venue_name", None),
+            maps_url=maps_url,
+            location_lat=getattr(payload, "location_lat", None),
+            location_lng=getattr(payload, "location_lng", None),
+            geo_radius_m=getattr(payload, "geo_radius_m", None),
+        )
+        db.add(event)
+        await db.flush()  # ✅ event.id available without committing yet
 
-            # ✅ insert mapping rows
-            db.add_all(
-                [EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids]
-            )
+        db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
 
-        # outside begin: committed successfully
+        await db.commit()
         await db.refresh(event)
 
-        # ✅ Return dict directly (no _event_out_dict)
-        out = {
+        return {
             "id": event.id,
             "title": event.title,
             "description": event.description,
@@ -899,14 +892,15 @@ async def create_event(db: AsyncSession, payload) -> dict:
             "location_lat": getattr(event, "location_lat", None),
             "location_lng": getattr(event, "location_lng", None),
             "geo_radius_m": getattr(event, "geo_radius_m", None),
-            "activity_type_ids": ids,  # helpful for UI/debug
+            "activity_type_ids": ids,
         }
-        return out
 
     except HTTPException:
         raise
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
     except Exception as e:
-        # db.begin() rolls back automatically on exception, but keeping this is fine
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
     
