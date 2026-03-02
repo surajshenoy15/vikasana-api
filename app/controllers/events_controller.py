@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from typing import Any, Optional
 from urllib.parse import quote
 from sqlalchemy import delete
-
+from typing import List
 from fastapi import HTTPException
 from sqlalchemy import select, func, delete as sql_delete, update, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -608,14 +608,15 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 
 async def create_event(db: AsyncSession, payload):
     """
-    ✅ FIXED create_event:
+    ✅ FIXED create_event (for your current DB schema):
     - Parses event_date (string -> date)
     - Parses start_time (string -> time)
-    - Parses end_time (string/time -> naive datetime)
+    - ✅ Parses end_time (string/datetime -> time)  (FIX: DB column is TIME)
+    - Validates end_time exists and is after start_time
     - Atomic commit with mapping rows
     - Blocks empty mapping
-    - ✅ VALIDATES activity_type_ids exist (prevents wrong IDs like 5,15)
-    - ✅ Sync mapping (delete old + insert new) for safety
+    - Validates activity_type_ids exist
+    - Sync mapping (delete old + insert new) for safety
     """
 
     # Debug
@@ -661,22 +662,28 @@ async def create_event(db: AsyncSession, payload):
         or getattr(payload, "time", None)
     )
     start_time = _parse_time(start_time_raw)
-    if start_time_raw is not None and start_time is None:
-        raise HTTPException(status_code=422, detail="start_time must be a valid time like HH:MM")
+    if start_time is None:
+        raise HTTPException(status_code=422, detail="start_time is required and must be a valid time like HH:MM")
 
     # ─────────────────────────────────────────────────────────────
-    # Parse end_time -> store as naive datetime (IST clock)
+    # Parse end_time (✅ MUST be TIME to match DB column)
     # ─────────────────────────────────────────────────────────────
     end_time_raw = getattr(payload, "end_time", None)
-    end_time_dt = None
-    if end_time_raw is not None and end_time_raw != "":
+
+    end_time: time_type | None = None
+    if end_time_raw is not None and str(end_time_raw).strip() != "":
         if isinstance(end_time_raw, datetime):
-            end_time_dt = end_time_raw.replace(tzinfo=None)
+            end_time = end_time_raw.time().replace(tzinfo=None)
         else:
-            end_t = _parse_time(end_time_raw)
-            if end_t is None:
-                raise HTTPException(status_code=422, detail="end_time must be a valid time like HH:MM")
-            end_time_dt = _combine_event_datetime_ist_naive(event_date, end_t)
+            end_time = _parse_time(end_time_raw)
+
+    # ✅ enforce end_time (prevents NULL which breaks window queries/certificates)
+    if end_time is None:
+        raise HTTPException(status_code=422, detail="end_time is required and must be a valid time like HH:MM")
+
+    # ✅ sanity: end must be after start (same-day events)
+    if end_time <= start_time:
+        raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     venue_name = getattr(payload, "venue_name", None)
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
@@ -690,8 +697,8 @@ async def create_event(db: AsyncSession, payload):
         required_photos=int(getattr(payload, "required_photos", 3) or 3),
         is_active=True,
         event_date=event_date,
-        start_time=start_time,
-        end_time=end_time_dt,
+        start_time=start_time,  # time
+        end_time=end_time,      # ✅ time (FIXED)
         thumbnail_url=getattr(payload, "thumbnail_url", None),
         venue_name=venue_name,
         maps_url=maps_url,
@@ -702,7 +709,7 @@ async def create_event(db: AsyncSession, payload):
     # ─────────────────────────────────────────────────────────────
     # Robust activity type extraction
     # ─────────────────────────────────────────────────────────────
-    ids: list[int] = []
+    ids: List[int] = []
 
     raw_ids = (
         getattr(payload, "activity_type_ids", None)
@@ -753,10 +760,8 @@ async def create_event(db: AsyncSession, payload):
         await db.rollback()
         raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
 
-    # ✅ Validate IDs exist in ActivityType (prevents wrong IDs like 5,15)
-    exist_q = await db.execute(
-        select(ActivityType.id, ActivityType.name).where(ActivityType.id.in_(ids))
-    )
+    # ✅ Validate IDs exist in ActivityType
+    exist_q = await db.execute(select(ActivityType.id, ActivityType.name).where(ActivityType.id.in_(ids)))
     rows = exist_q.all()
     existing_ids = {int(r[0]) for r in rows}
     missing = [i for i in ids if i not in existing_ids]
@@ -769,7 +774,7 @@ async def create_event(db: AsyncSession, payload):
 
     print("✅ Activity types confirmed:", [(int(r[0]), r[1]) for r in rows])
 
-    # ✅ Permanent mapping sync (safety): delete any existing mapping rows then insert
+    # ✅ Permanent mapping sync: delete any existing mapping rows then insert
     await db.execute(delete(EventActivityType).where(EventActivityType.event_id == event.id))
     for at_id in ids:
         db.add(EventActivityType(event_id=event.id, activity_type_id=int(at_id)))
