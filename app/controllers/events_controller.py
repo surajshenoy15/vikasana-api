@@ -135,32 +135,45 @@ def _now_ist_aware() -> datetime:
     """Current time in IST (timezone-aware)."""
     return datetime.now(IST)
 
+def _to_ist_aware(dt: datetime) -> datetime:
+    # treat naive as IST-local
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=IST)
+    return dt.astimezone(IST)
 
-def _event_window_ist_aware(event) -> tuple[datetime, datetime]:
+def _event_window_ist_aware(ev) -> tuple[datetime, datetime]:
     """
-    Build event window as timezone-aware IST datetimes.
-
-    event.event_date: date (required)
-    event.start_time: time | None
-    event.end_time  : time | None
-
-    ✅ Supports cross-midnight windows: if end <= start, end is moved to next day.
+    Returns (start_ist, end_ist) as timezone-aware IST datetimes.
+    Handles end_time stored as TIME or DATETIME (legacy).
     """
-    if not getattr(event, "event_date", None):
-        raise HTTPException(status_code=400, detail="Event date not configured.")
+    if not ev.event_date:
+        raise ValueError("event_date missing")
 
-    start_t: time_type = getattr(event, "start_time", None) or time_type(0, 0)
-    end_t: time_type = getattr(event, "end_time", None) or time_type(23, 59, 59)
+    if not ev.start_time:
+        raise ValueError("start_time missing")
 
-    start_ist = datetime.combine(event.event_date, start_t).replace(tzinfo=IST)
-    end_ist = datetime.combine(event.event_date, end_t).replace(tzinfo=IST)
+    # start_time: should be time
+    if isinstance(ev.start_time, datetime):
+        start_dt = ev.start_time
+    else:
+        start_dt = datetime.combine(ev.event_date, ev.start_time)
 
-    # ✅ Cross-midnight safety (e.g., 23:00 -> 01:00 next day)
-    if end_ist <= start_ist:
-        end_ist = end_ist + timedelta(days=1)
+    # end_time: can be time or datetime depending on legacy/model
+    end_val = getattr(ev, "end_time", None)
+    if end_val is None:
+        raise ValueError("end_time missing")
 
-    return start_ist, end_ist
+    if isinstance(end_val, datetime):
+        end_dt = end_val
+    elif isinstance(end_val, time_type):
+        end_dt = datetime.combine(ev.event_date, end_val)
+        # optional: if end < start, treat as next day
+        if end_dt <= datetime.combine(ev.event_date, ev.start_time):
+            end_dt = end_dt + timedelta(days=1)
+    else:
+        raise ValueError(f"invalid end_time type: {type(end_val)}")
 
+    return _to_ist_aware(start_dt), _to_ist_aware(end_dt)
 
 def _event_window_utc(event) -> tuple[datetime, datetime]:
     """
