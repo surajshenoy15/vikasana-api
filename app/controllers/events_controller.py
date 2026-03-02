@@ -1010,6 +1010,11 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # ---------------------- STUDENT ---------------------------
 # =========================================================
 async def list_active_events(db: AsyncSession) -> list[Event]:
+    """
+    Returns ALL events (upcoming + ongoing + past) so the frontend
+    can classify them into tabs using deriveStatus().
+    No time-window filtering here — that was causing empty results.
+    """
     try:
         q = await db.execute(
             select(Event)
@@ -1017,7 +1022,8 @@ async def list_active_events(db: AsyncSession) -> list[Event]:
             .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
         )
         events = q.scalars().all()
-        return events  # ✅ Return ALL events, let frontend derive status
+        return events  # ✅ Return ALL, frontend handles Upcoming/Ongoing/Past tabs
+
     except Exception as e:
         print(f"Error fetching events: {str(e)}")
         return []
