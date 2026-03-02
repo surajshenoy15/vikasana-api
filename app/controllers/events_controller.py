@@ -1010,40 +1010,30 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # ---------------------- STUDENT ---------------------------
 # =========================================================
 async def list_active_events(db: AsyncSession) -> list[Event]:
-    now_ist = datetime.now(IST)  # Get the current time in IST
+    now_ist = datetime.now(IST)  # Current time in IST (Indian Standard Time)
     
     try:
-        # Fetch events considering event_date and ensuring correct order with start_time
+        # Fetch events ordered by event date and start time
         q = await db.execute(
             select(Event)
             .where(Event.event_date.isnot(None))  # Ensure event date exists
-            .order_by(
-                Event.event_date.desc(),
-                Event.start_time.asc().nulls_last(),  # Null start times come at the end
-                Event.id.desc()  # Fallback to ID if needed
-            )
+            .order_by(Event.event_date.desc(), Event.start_time.asc().nulls_last(), Event.id.desc())
         )
-        events = q.scalars().all()  # Fetch all events
-        print(f"All events fetched: {len(events)}")  # Log all events fetched
-        
+        events = q.scalars().all()
         active_events = []
         
-        # Iterate through all fetched events
+        # Loop through fetched events to check if they are ongoing
         for event in events:
-            print(f"Processing event: {event.id}, Start Time: {event.start_time}, End Time: {event.end_time}")
-            
-            # Ensure _event_window_ist_aware returns datetime objects in IST timezone
             start_ist, end_ist = _event_window_ist_aware(event)
             
-            # Include events where the current time is within the event's window (active events)
-            if start_ist <= now_ist <= end_ist:  # Only include events that are currently ongoing
+            # Check if the current time is within the event's window
+            if start_ist <= now_ist <= end_ist:
                 active_events.append(event)
         
-        print(f"Total active events fetched: {len(active_events)}")  # Log active events count
         return active_events
 
     except Exception as e:
-        print(f"Error fetching events: {str(e)}")
+        print(f"Error fetching active events: {str(e)}")
         return []
 
 
