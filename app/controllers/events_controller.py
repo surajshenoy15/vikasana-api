@@ -1009,29 +1009,38 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
 # =========================================================
 # ---------------------- STUDENT ---------------------------
 # =========================================================
-async def list_active_events(db: AsyncSession):
+async def list_active_events(db: AsyncSession) -> List[Event]:
     now_ist = datetime.now(IST)
     try:
+        # Fetch events considering event_date and ensuring correct order with start_time
         q = await db.execute(
             select(Event)
             .where(Event.event_date.isnot(None))  # Ensure event date exists
             .order_by(
                 Event.event_date.desc(),
-                Event.start_time.asc().nulls_last(),
-                Event.id.desc()
+                Event.start_time.asc().nulls_last(),  # Null start times come at the end
+                Event.id.desc()  # Fallback to ID if needed
             )
         )
         events = q.scalars().all()
         print(f"All events fetched: {len(events)}")  # Log all events fetched
-        active: list[Event] = []
+        active: List[Event] = []
+        
         for e in events:
             print(f"Processing event: {e.id}, Start Time: {e.start_time}, End Time: {e.end_time}")
-            # Check event window validity
+            
+            # Ensure _event_window_ist_aware returns datetime objects in IST timezone
             start_ist, end_ist = _event_window_ist_aware(e)
+            
             if now_ist <= end_ist:
                 active.append(e)
-        print(f"Total active events fetched: {len(active)}")  # Log the active events count
+        
+        print(f"Total active events fetched: {len(active)}")  # Log active events count
         return active
+
+    except SQLAlchemyError as e:
+        print(f"SQLAlchemy Error: {str(e)}")
+        return []
     except Exception as e:
         print(f"Error fetching events: {str(e)}")
         return []
