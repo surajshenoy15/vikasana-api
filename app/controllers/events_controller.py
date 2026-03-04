@@ -152,36 +152,54 @@ def _to_ist_aware(dt: datetime) -> datetime:
 def _event_window_ist_aware(ev) -> tuple[datetime, datetime]:
     """
     Returns (start_ist, end_ist) as timezone-aware IST datetimes.
-    Handles end_time stored as TIME or DATETIME (legacy).
+
+    ✅ UPDATED:
+    - If end_time is NULL → default start + 24 hours
+    - If end_time <= start_time → treat as next day
     """
+
     if not ev.event_date:
         raise ValueError("event_date missing")
 
     if not ev.start_time:
         raise ValueError("start_time missing")
 
-    # start_time: should be time
+    # ─────────────────────────────────────────────
+    # Start datetime
+    # ─────────────────────────────────────────────
     if isinstance(ev.start_time, datetime):
         start_dt = ev.start_time
     else:
         start_dt = datetime.combine(ev.event_date, ev.start_time)
 
-    # end_time: can be time or datetime depending on legacy/model
+    start_ist = _to_ist_aware(start_dt)
+
+    # ─────────────────────────────────────────────
+    # End datetime
+    # ─────────────────────────────────────────────
     end_val = getattr(ev, "end_time", None)
+
+    # ✅ if end_time not provided → default 24 hours
     if end_val is None:
-        raise ValueError("end_time missing")
+        end_ist = start_ist + timedelta(hours=24)
+        return start_ist, end_ist
 
     if isinstance(end_val, datetime):
         end_dt = end_val
+
     elif isinstance(end_val, time_type):
         end_dt = datetime.combine(ev.event_date, end_val)
-        # optional: if end < start, treat as next day
+
+        # if end <= start => next day
         if end_dt <= datetime.combine(ev.event_date, ev.start_time):
             end_dt = end_dt + timedelta(days=1)
+
     else:
         raise ValueError(f"invalid end_time type: {type(end_val)}")
 
-    return _to_ist_aware(start_dt), _to_ist_aware(end_dt)
+    end_ist = _to_ist_aware(end_dt)
+
+    return start_ist, end_ist
 
 def _event_window_utc(event) -> tuple[datetime, datetime]:
     """
@@ -212,6 +230,68 @@ def _ensure_event_window(event) -> None:
 
     if now_ist > end_ist:
         raise HTTPException(status_code=403, detail="Event has ended.")
+    
+
+def _next_missing_seq(uploaded: set[int], required_photos: int) -> int:
+    for i in range(1, required_photos + 1):
+        if i not in uploaded:
+            return i
+    return required_photos + 1  # means complete
+
+
+async def get_student_event_draft_progress(db: AsyncSession, student_id: int, event_id: int) -> dict:
+    """
+    Returns draft progress so mobile app can resume:
+    - which seq_no already uploaded
+    - next_seq_no to capture
+    """
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    required_photos = int(getattr(event, "required_photos", 3) or 3)
+
+    res = await db.execute(
+        select(EventSubmission).where(
+            EventSubmission.event_id == event_id,
+            EventSubmission.student_id == student_id,
+        )
+    )
+    sub = res.scalar_one_or_none()
+
+    if not sub:
+        return {
+            "exists": False,
+            "submission_id": None,
+            "status": None,
+            "required_photos": required_photos,
+            "uploaded_seq_nos": [],
+            "next_seq_no": 1,
+            "is_complete": False,
+            "photos": [],
+        }
+
+    pres = await db.execute(
+        select(EventSubmissionPhoto.seq_no, EventSubmissionPhoto.image_url)
+        .where(EventSubmissionPhoto.submission_id == sub.id)
+        .order_by(EventSubmissionPhoto.seq_no.asc())
+    )
+    rows = pres.all()
+
+    uploaded_seq = {int(r[0]) for r in rows if r and r[0] is not None}
+    next_seq = _next_missing_seq(uploaded_seq, required_photos)
+    is_complete = next_seq > required_photos
+
+    return {
+        "exists": True,
+        "submission_id": sub.id,
+        "status": sub.status,
+        "required_photos": required_photos,
+        "uploaded_seq_nos": sorted(uploaded_seq),
+        "next_seq_no": next_seq,
+        "is_complete": is_complete,
+        "photos": [{"seq_no": int(r[0]), "image_url": r[1]} for r in rows],
+    }
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -849,12 +929,12 @@ async def get_event_thumbnail_upload_url(admin_id: int, filename: str, content_t
 # =========================================================
 async def create_event(db: AsyncSession, payload) -> dict:
     """
-    ✅ FIXED create_event (no nested transaction bug):
-    - NO `async with db.begin()` (prevents "transaction already begun" when get_db() already begins)
-    - Validates date/time + end_time > start_time
+    ✅ UPDATED create_event:
+    - end_time is OPTIONAL
+    - if end_time missing → defaults to +24 hours from start_time (window logic handles next-day)
+    - No nested transaction
     - Validates ActivityType IDs exist
     - Inserts Event + mappings atomically with ONE commit
-    - Returns dict directly
     """
 
     # ─────────────────────────────────────────────
@@ -872,17 +952,25 @@ async def create_event(db: AsyncSession, payload) -> dict:
     if start_time is None:
         raise HTTPException(status_code=422, detail="start_time is required (HH:MM)")
 
+    # ✅ end_time OPTIONAL
     end_time: time_type | None = _parse_time(getattr(payload, "end_time", None))
-    if end_time is None:
-        raise HTTPException(status_code=422, detail="end_time is required (HH:MM)")
 
-    if end_time <= start_time:
+    # ✅ if end_time missing → default 24 hours from start_time
+    # (stored as TIME; window helpers treat end<=start as next day)
+    if end_time is None:
+        end_time = start_time
+
+    # If admin DID provide end_time, validate it
+    # (same-day validation only; cross-midnight support comes from window helper)
+    if getattr(payload, "end_time", None) is not None and end_time <= start_time:
         raise HTTPException(status_code=422, detail="end_time must be after start_time")
 
     # ─────────────────────────────────────────────
     # required_photos safety
     # ─────────────────────────────────────────────
     required_photos = int(getattr(payload, "required_photos", 3) or 3)
+    # if you want ONLY 5 in backend too, change to:
+    # if required_photos != 5: raise HTTPException(...)
     if required_photos < 3 or required_photos > 5:
         raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
 
@@ -903,7 +991,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
     maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
 
     # ─────────────────────────────────────────────
-    # Create event + mapping in ONE transaction (manual commit)
+    # Create event + mapping in ONE transaction
     # ─────────────────────────────────────────────
     try:
         event = Event(
@@ -913,7 +1001,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
             is_active=True,
             event_date=event_date,
             start_time=start_time,
-            end_time=end_time,
+            end_time=end_time,  # ✅ may equal start_time when omitted (means +24h in window helper)
             thumbnail_url=getattr(payload, "thumbnail_url", None),
             venue_name=getattr(payload, "venue_name", None),
             maps_url=maps_url,
@@ -922,7 +1010,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
             geo_radius_m=getattr(payload, "geo_radius_m", None),
         )
         db.add(event)
-        await db.flush()  # ✅ event.id available without committing yet
+        await db.flush()  # ✅ event.id available
 
         db.add_all([EventActivityType(event_id=event.id, activity_type_id=at_id) for at_id in ids])
 
@@ -1127,9 +1215,14 @@ async def end_event(db: AsyncSession, event_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # ✅ set inactive
     event.is_active = False
 
-    # Expire only unfinished
+    # ✅ set end_time = NOW (IST) so window becomes correct
+    now_ist = _now_ist_aware()
+    event.end_time = now_ist.time().replace(tzinfo=None)
+
+    # Expire only unfinished submissions
     await db.execute(
         update(EventSubmission)
         .where(

@@ -45,6 +45,7 @@ from app.controllers.events_controller import (
     list_student_event_certificates,
     regenerate_event_certificates,
     auto_approve_event_from_sessions,
+    get_student_event_draft_progress,
 )
 
 router = APIRouter(tags=["Events"])
@@ -288,6 +289,14 @@ async def register_event(
     student=Depends(get_current_student),
 ):
     return await register_for_event(db, student.id, event_id)
+
+@router.get("/student/events/{event_id}/draft")
+async def student_event_draft(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    student=Depends(get_current_student),
+):
+    return await get_student_event_draft_progress(db, student.id, event_id)
 
 
 # ✅ FIXED: event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
