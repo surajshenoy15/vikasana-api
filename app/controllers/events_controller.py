@@ -121,12 +121,20 @@ def _parse_time(val: Any) -> Optional[time_type]:
 # # =========================================================
 # ---------------------- TIME HELPERS ----------------------
 # =========================================================
+def _status_lower(col):
+    """Normalize enum/string status columns to lowercase string for safe comparisons."""
+    return func.lower(cast(col, String))
+
+def _session_is_approved():
+    """Treat APPROVED case-insensitively, compatible with enum/string storage."""
+    return _status_lower(ActivitySession.status) == "approved"
+
+def _submission_is_approved_or_expired():
+    """EventSubmission can be approved or expired for certificate generation."""
+    return _status_lower(EventSubmission.status).in_(["approved", "expired"])
 
 
 
-from datetime import datetime, timezone, timedelta, time as time_type
-from zoneinfo import ZoneInfo
-from fastapi import HTTPException
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -308,12 +316,14 @@ async def _eligible_students_from_sessions(
 async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> dict:
     """
     ✅ MAIN BUTTON LOGIC (Top approve):
-    - Finds students with APPROVED sessions within event window for mapped activity types
+    - Finds students with APPROVED sessions overlapping the event window for mapped activity types
     - Upserts EventSubmission => status="approved", sets submitted_at + approved_at
     - Generates certificates for them
 
     ✅ FIXES:
-    - ActivitySession.status matched case-insensitively (handles "APPROVED" enum/string)
+    - ActivitySession.status matched case-insensitively (handles DB values like "APPROVED")
+    - Fallback activity-type inference uses OVERLAP logic (not started_at-only)
+    - Uses session_end = coalesce(submitted_at, expires_at, end_utc) to avoid NULL-end killing matches
     - Treats expired/pending submissions as re-approvable if student is eligible
     - Uses consistent UTC window logic
     """
@@ -322,7 +332,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # Event window
+    # Event window (UTC)
     start_utc, end_utc = _event_window_utc(event)
     if end_utc <= start_utc:
         end_utc = start_utc + timedelta(hours=6)
@@ -331,31 +341,50 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
     mapped_ids = await _get_event_activity_type_ids(db, event_id)
     activity_type_ids = sorted({int(x) for x in mapped_ids if x is not None})
 
-    # ✅ FALLBACK: infer activity types from APPROVED sessions inside event window
+    # ✅ FALLBACK: infer activity types from APPROVED sessions OVERLAPPING the window
     if not activity_type_ids:
+        session_end = func.coalesce(
+            ActivitySession.submitted_at,
+            ActivitySession.expires_at,
+            end_utc,  # ✅ critical fallback
+        )
+
         aq = await db.execute(
             select(func.distinct(ActivitySession.activity_type_id)).where(
+                # ✅ case-insensitive "APPROVED"
                 func.lower(cast(ActivitySession.status, String)) == "approved",
-                ActivitySession.started_at >= start_utc,
-                ActivitySession.started_at <= end_utc,
                 ActivitySession.activity_type_id.is_not(None),
+
+                # ✅ overlap (NOT started_at inside window)
+                ActivitySession.started_at <= end_utc,
+                session_end >= start_utc,
             )
         )
         activity_type_ids = sorted({int(r[0]) for r in aq.all() if r and r[0] is not None})
 
     if not activity_type_ids:
-        return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
+        return {
+            "event_id": event_id,
+            "eligible_students": 0,
+            "submissions_approved": 0,
+            "certificates_issued": 0,
+        }
 
-    # ✅ Get eligible students (make sure helper uses same case-insensitive status logic)
+    # ✅ Get eligible students (your helper already uses overlap + NULL-end fallback)
     eligible_student_ids = await _eligible_students_from_sessions(db, event, activity_type_ids)
     eligible_student_ids = sorted({int(x) for x in (eligible_student_ids or []) if x is not None})
 
     if not eligible_student_ids:
-        return {"event_id": event_id, "eligible_students": 0, "submissions_approved": 0, "certificates_issued": 0}
+        return {
+            "event_id": event_id,
+            "eligible_students": 0,
+            "submissions_approved": 0,
+            "certificates_issued": 0,
+        }
 
     now_utc = datetime.now(timezone.utc)
-
     submissions_approved = 0
+
     for sid in eligible_student_ids:
         res = await db.execute(
             select(EventSubmission).where(
@@ -385,7 +414,7 @@ async def auto_approve_event_from_sessions(db: AsyncSession, event_id: int) -> d
 
     await db.commit()
 
-    # ✅ Issue certificates for approved submissions
+    # ✅ Issue certificates for approved/expired submissions
     issued = await _issue_certificates_for_event(db, event)
 
     return {
@@ -403,19 +432,29 @@ async def _infer_activity_type_ids_from_sessions(
 ) -> list[int]:
     """
     Infer activity types from APPROVED sessions overlapping the event window.
-    ✅ No ActivitySession.event_id (your table doesn't have it)
+
+    ✅ FIX:
+    - Uses session_end fallback = coalesce(submitted_at, expires_at, end_utc)
+      so NULL end timestamps don't kill overlap filters.
+    - Uses case-insensitive APPROVED match.
     """
+    session_end = func.coalesce(
+        ActivitySession.submitted_at,
+        ActivitySession.expires_at,
+        end_utc,  # ✅ fallback prevents NULL end from breaking overlap logic
+    )
+
     aq = await db.execute(
         select(func.distinct(ActivitySession.activity_type_id)).where(
-            ActivitySession.status == ActivitySessionStatus.APPROVED,
+            _session_is_approved(),
             ActivitySession.activity_type_id.is_not(None),
-            # overlap with window
+
+            # ✅ overlap logic
             ActivitySession.started_at <= end_utc,
-            func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at) >= start_utc,
+            session_end >= start_utc,
         )
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
-
 
 
 # assumes these are already imported in your file:
@@ -916,6 +955,172 @@ async def create_event(db: AsyncSession, payload) -> dict:
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
+    
+# =========================================================
+# ---------------------- ADMIN: UPDATE EVENT --------------
+# =========================================================
+async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
+    """
+    ✅ Update event + (optionally) replace Event ↔ ActivityType mappings.
+
+    Partial update:
+      - only fields present in payload are applied
+      - if activity_type_ids is provided, mappings are replaced
+
+    Validations:
+      - required_photos in [3..5] if provided
+      - end_time > start_time (same day)
+      - activity_type_ids must exist if provided
+    """
+    event = await db.get(Event, event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # -----------------------
+    # Extract incoming fields
+    # -----------------------
+    title = getattr(payload, "title", None)
+    description = getattr(payload, "description", None)
+    thumbnail_url = getattr(payload, "thumbnail_url", None)
+    venue_name = getattr(payload, "venue_name", None)
+    maps_url = getattr(payload, "maps_url", None) or getattr(payload, "venue_maps_url", None)
+
+    location_lat = getattr(payload, "location_lat", None)
+    location_lng = getattr(payload, "location_lng", None)
+    geo_radius_m = getattr(payload, "geo_radius_m", None)
+
+    is_active = getattr(payload, "is_active", None)
+
+    # date/time may come in different keys
+    new_event_date = _parse_date(getattr(payload, "event_date", None) or getattr(payload, "date", None))
+    new_start_time = _parse_time(getattr(payload, "start_time", None) or getattr(payload, "time", None))
+    new_end_time = _parse_time(getattr(payload, "end_time", None))
+
+    required_photos_in = getattr(payload, "required_photos", None)
+
+    # activity types (optional)
+    activity_type_ids_raw = getattr(payload, "activity_type_ids", None)
+    replace_mappings = activity_type_ids_raw is not None  # if provided, we replace
+
+    # -----------------------
+    # Apply updates to model
+    # -----------------------
+    if title is not None:
+        event.title = str(title).strip()
+
+    if description is not None:
+        event.description = description or None
+
+    if thumbnail_url is not None:
+        event.thumbnail_url = thumbnail_url or None
+
+    if venue_name is not None:
+        event.venue_name = venue_name or None
+
+    if maps_url is not None:
+        event.maps_url = maps_url or None
+
+    if location_lat is not None:
+        event.location_lat = location_lat
+
+    if location_lng is not None:
+        event.location_lng = location_lng
+
+    if geo_radius_m is not None:
+        event.geo_radius_m = geo_radius_m
+
+    if is_active is not None:
+        event.is_active = bool(is_active)
+
+    # required_photos validation
+    if required_photos_in is not None:
+        rp = int(required_photos_in)
+        if rp < 3 or rp > 5:
+            raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
+        event.required_photos = rp
+
+    # apply date/time (partial)
+    if new_event_date is not None:
+        event.event_date = new_event_date
+    if new_start_time is not None:
+        event.start_time = new_start_time
+    if new_end_time is not None:
+        event.end_time = new_end_time
+
+    # validate time window if any changed OR if existing is incomplete
+    if (new_event_date is not None) or (new_start_time is not None) or (new_end_time is not None):
+        if not event.event_date:
+            raise HTTPException(status_code=422, detail="event_date is required")
+        if not event.start_time:
+            raise HTTPException(status_code=422, detail="start_time is required")
+        if not event.end_time:
+            raise HTTPException(status_code=422, detail="end_time is required")
+
+        # end must be after start (same day; your _event_window helper handles wrap)
+        # But keep simple validation here:
+        st = event.start_time if isinstance(event.start_time, time_type) else _parse_time(event.start_time)
+        et = event.end_time if isinstance(event.end_time, time_type) else _parse_time(event.end_time)
+        if st is None or et is None:
+            raise HTTPException(status_code=422, detail="Invalid start_time/end_time")
+        if et <= st:
+            raise HTTPException(status_code=422, detail="end_time must be after start_time")
+
+    # -----------------------
+    # Replace mappings if provided
+    # -----------------------
+    new_ids: list[int] = []
+    if replace_mappings:
+        new_ids = sorted({int(x) for x in (activity_type_ids_raw or []) if x is not None and int(x) > 0})
+        if not new_ids:
+            raise HTTPException(status_code=422, detail="Please select at least 1 activity type")
+
+        q = await db.execute(select(ActivityType.id).where(ActivityType.id.in_(new_ids)))
+        existing = {int(r[0]) for r in q.all()}
+        missing = [i for i in new_ids if i not in existing]
+        if missing:
+            raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
+
+        try:
+            # delete old
+            await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
+            # insert new
+            db.add_all([EventActivityType(event_id=event_id, activity_type_id=at_id) for at_id in new_ids])
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to update activity mappings: {str(e)}")
+
+    # -----------------------
+    # Commit
+    # -----------------------
+    try:
+        await db.commit()
+        await db.refresh(event)
+    except SQLAlchemyError as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to update event: {str(e)}")
+
+    # fetch ids if not replaced (for response)
+    if not replace_mappings:
+        mapped_ids = await _get_event_activity_type_ids(db, event_id)
+        new_ids = sorted({int(x) for x in mapped_ids if x is not None})
+
+    return {
+        "id": event.id,
+        "title": event.title,
+        "description": event.description,
+        "required_photos": event.required_photos,
+        "is_active": event.is_active,
+        "event_date": event.event_date,
+        "start_time": event.start_time,
+        "end_time": event.end_time,
+        "thumbnail_url": getattr(event, "thumbnail_url", None),
+        "venue_name": getattr(event, "venue_name", None),
+        "maps_url": getattr(event, "maps_url", None),
+        "location_lat": getattr(event, "location_lat", None),
+        "location_lng": getattr(event, "location_lng", None),
+        "geo_radius_m": getattr(event, "geo_radius_m", None),
+        "activity_type_ids": new_ids,
+    }
     
 async def end_event(db: AsyncSession, event_id: int):
     event = await db.get(Event, event_id)
