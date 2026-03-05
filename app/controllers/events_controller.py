@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.cert_sign import sign_cert
+from sqlalchemy.orm import selectinload
 from app.core.cert_pdf import build_certificate_pdf
 from app.core.cert_storage import (
     upload_certificate_pdf_bytes,
@@ -1259,8 +1260,16 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
-    q = await db.execute(select(EventSubmission).where(EventSubmission.event_id == event_id))
-    return q.scalars().all()
+    res = await db.execute(
+        select(EventSubmission)
+        .where(EventSubmission.event_id == event_id)
+        .options(
+            selectinload(EventSubmission.photos),  # ✅ fixes MissingGreenlet
+            # selectinload(EventSubmission.event), # optional if your schema accesses event.*
+        )
+        .order_by(EventSubmission.id.desc())
+    )
+    return res.scalars().all()
 
 
 async def approve_submission(db: AsyncSession, submission_id: int):
