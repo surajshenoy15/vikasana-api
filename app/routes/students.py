@@ -4,11 +4,12 @@
 # - certificates_count = COUNT(Certificate)
 
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
+from pydantic import BaseModel, Field, model_validator, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
 from sqlalchemy.orm import selectinload
 from app.models.student_point_adjustment import StudentPointAdjustment
-from typing import Literal
+from typing import Literal,Any
 from app.core.database import get_db
 from app.core.dependencies import get_current_faculty, get_current_admin, get_current_student
 from app.models.faculty import Faculty
@@ -437,9 +438,56 @@ async def update_student_admin(
     )
 
 class ManualActivityPointsIn(BaseModel):
-    mode: Literal["SET_TOTAL", "ADD"] = "SET_TOTAL"
-    value: int
-    reason: str
+    """
+    Accepts both payload styles:
+
+    1) Set total:
+        { "mode": "SET_TOTAL", "new_total": 25, "reason": "..." }
+
+    2) Add/Subtract:
+        { "mode": "ADD_SUBTRACT", "delta": 5, "reason": "..." }
+        { "mode": "ADD", "delta": 5, "reason": "..." }
+        { "mode": "SUBTRACT", "delta": 5, "reason": "..." }
+
+    Also supports legacy:
+        { "mode": "...", "value": 25, "reason": "..." }
+    """
+    model_config = ConfigDict(extra="allow")
+
+    mode: str = Field(..., description="SET_TOTAL | ADD_SUBTRACT | ADD | SUBTRACT")
+    reason: str = Field(..., min_length=1)
+
+    # frontend-friendly fields
+    new_total: Optional[int] = None
+    delta: Optional[int] = None
+
+    # legacy support
+    value: Optional[int] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize(cls, data: Any):
+        if not isinstance(data, dict):
+            return data
+
+        # normalize mode values coming from UI labels
+        m = str(data.get("mode", "")).strip().upper()
+        if m in ("ADD / SUBTRACT", "ADD_SUBTRACT", "ADD-SUBTRACT"):
+            m = "ADD_SUBTRACT"
+        elif m in ("SET TOTAL", "SET_TOTAL"):
+            m = "SET_TOTAL"
+        data["mode"] = m
+
+        # if frontend sends "value" for set total, map it
+        if data.get("new_total") is None and data.get("value") is not None:
+            data["new_total"] = data.get("value")
+
+        # if frontend sends "value" for delta, map it
+        if data.get("delta") is None and data.get("value") is not None and m in ("ADD", "SUBTRACT", "ADD_SUBTRACT"):
+            data["delta"] = data.get("value")
+
+        return data
+
 
 @admin_router.patch("/{student_id}/activity-points")
 async def admin_update_student_activity_points(
@@ -456,20 +504,33 @@ async def admin_update_student_activity_points(
         raise HTTPException(status_code=404, detail="Student not found")
 
     old_total = int(s.total_points_earned or 0)
-
-    mode = (payload.mode or "SET_TOTAL").upper().strip()
-    reason = (payload.reason or "").strip()
-    if not reason:
-        raise HTTPException(status_code=422, detail="reason is required")
+    mode = payload.mode
 
     if mode == "SET_TOTAL":
-        new_total = int(payload.value)
+        if payload.new_total is None:
+            raise HTTPException(status_code=422, detail="new_total is required for SET_TOTAL")
+        new_total = int(payload.new_total)
         delta = new_total - old_total
-    elif mode == "ADD":
-        delta = int(payload.value)
+
+    elif mode in ("ADD_SUBTRACT", "ADD", "SUBTRACT"):
+        if payload.delta is None:
+            raise HTTPException(status_code=422, detail="delta is required for ADD/SUBTRACT")
+        d = int(payload.delta)
+
+        # If mode is SUBTRACT, force negative
+        if mode == "SUBTRACT":
+            d = -abs(d)
+
+        # If mode is ADD, force positive
+        if mode == "ADD":
+            d = abs(d)
+
+        # If ADD_SUBTRACT, allow + or -
+        delta = d
         new_total = old_total + delta
+
     else:
-        raise HTTPException(status_code=422, detail="mode must be SET_TOTAL or ADD")
+        raise HTTPException(status_code=422, detail="mode must be SET_TOTAL | ADD_SUBTRACT | ADD | SUBTRACT")
 
     if new_total < 0:
         raise HTTPException(status_code=422, detail="total points cannot be negative")
@@ -481,7 +542,7 @@ async def admin_update_student_activity_points(
             student_id=s.id,
             delta_points=int(delta),
             new_total_points=int(new_total),
-            reason=reason,
+            reason=payload.reason.strip(),
             created_by_admin_id=getattr(current_admin, "id", None),
         )
     )
