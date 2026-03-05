@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from app.models.activity_face_check import ActivityFaceCheck
     from app.models.activity_photo import ActivityPhoto
 
+    # ✅ OPTIONAL (only if you add audit log table)
+    from app.models.student_point_adjustment import StudentPointAdjustment
+
 
 # --------------------------------------------------
 # ENUM
@@ -45,8 +48,9 @@ class Student(Base):
     __tablename__ = "students"
 
     __table_args__ = (
-        UniqueConstraint("usn", name="uq_students_usn"),
-        UniqueConstraint("email", name="uq_students_email"),
+        # ✅ FIXED: uniqueness per college
+        UniqueConstraint("college", "usn", name="uq_students_college_usn"),
+        UniqueConstraint("college", "email", name="uq_students_college_email"),
         Index("ix_students_college_branch", "college", "branch"),
     )
 
@@ -173,6 +177,13 @@ class Student(Base):
 
     activity_photos: Mapped[List["ActivityPhoto"]] = relationship(
         "ActivityPhoto",
+        back_populates="student",
+        cascade="all, delete-orphan",
+    )
+
+    # ✅ OPTIONAL: if you want to store points edits history
+    point_adjustments: Mapped[List["StudentPointAdjustment"]] = relationship(
+        "StudentPointAdjustment",
         back_populates="student",
         cascade="all, delete-orphan",
     )

@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.activity_photo import ActivityPhoto
@@ -6,9 +6,15 @@ from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.models.activity_type import ActivityType
 from app.models.student import Student
 from app.models.student_activity_progress import StudentActivityProgress
+from app.models.student_point_adjustment import StudentPointAdjustment
 
 
-async def award_points_for_session(db: AsyncSession, session_id: int) -> dict:
+async def award_points_for_session(
+    db: AsyncSession,
+    session_id: int,
+    *,
+    created_by_admin_id: int | None = None,  # optional (pass from approve endpoint)
+) -> dict:
     # 1) Load + lock session (prevents double-award in concurrent calls)
     res = await db.execute(
         select(ActivitySession)
@@ -19,17 +25,19 @@ async def award_points_for_session(db: AsyncSession, session_id: int) -> dict:
     if not session:
         raise ValueError("Session not found")
 
+    # ✅ Idempotency: if already processed once, do nothing
+    # (requires ActivitySession.points_awarded_at column)
+    if getattr(session, "points_awarded_at", None) is not None:
+        return {"awarded": 0, "reason": "Points already awarded for this session"}
+
     # Only award when session is SUBMITTED or APPROVED
     if session.status not in {ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED}:
         return {"awarded": 0, "reason": f"Session status is {session.status}, not eligible"}
 
     # 2) Get photos seq 1 and seq 5
-    q = (
-        select(ActivityPhoto)
-        .where(
-            ActivityPhoto.session_id == session_id,
-            ActivityPhoto.seq_no.in_([1, 5]),
-        )
+    q = select(ActivityPhoto).where(
+        ActivityPhoto.session_id == session_id,
+        ActivityPhoto.seq_no.in_([1, 5]),
     )
     rows = (await db.execute(q)).scalars().all()
     p1 = next((p for p in rows if p.seq_no == 1), None)
@@ -85,6 +93,7 @@ async def award_points_for_session(db: AsyncSession, session_id: int) -> dict:
         db.add(prog)
         await db.flush()
 
+    # ✅ Important: this must be protected by idempotency above
     prog.total_minutes = int(prog.total_minutes or 0) + duration_minutes
 
     # 6) Compute points that should exist after update (respect max_points)
@@ -96,6 +105,8 @@ async def award_points_for_session(db: AsyncSession, session_id: int) -> dict:
     if new_points < 0:
         new_points = 0
 
+    student_total = None
+
     # 7) Apply delta to student total (lock student row too)
     if new_points > 0:
         stu_q = select(Student).where(Student.id == session.student_id).with_for_update()
@@ -104,14 +115,30 @@ async def award_points_for_session(db: AsyncSession, session_id: int) -> dict:
             raise ValueError("Student not found")
 
         student.total_points_earned = int(student.total_points_earned or 0) + int(new_points)
-        prog.points_awarded = should_have
+        student_total = int(student.total_points_earned)
 
-    # ✅ DO NOT COMMIT HERE — caller (admin_approve_session) commits
+        prog.points_awarded = int(should_have)
 
+        # ✅ Store adjustment row in DB
+        db.add(
+            StudentPointAdjustment(
+                student_id=student.id,
+                delta_points=int(new_points),
+                new_total_points=student_total,
+                reason=f"AUTO_AWARD_SESSION_{session.id}",
+                created_by_admin_id=created_by_admin_id,
+            )
+        )
+
+    # ✅ CRITICAL FIX:
+    # Mark session as processed EVEN if new_points == 0 (prevents minutes being added again on re-approve)
+    session.points_awarded_at = func.now()
+
+    # ✅ DO NOT COMMIT HERE — caller commits
     return {
         "awarded": int(new_points),
-        "duration_minutes": duration_minutes,
+        "duration_minutes": int(duration_minutes),
         "total_minutes": int(prog.total_minutes),
         "points_awarded_total_for_activity": int(prog.points_awarded),
-        "student_total_points": None,  # you can return student.total_points_earned if you want
+        "student_total_points": student_total,
     }

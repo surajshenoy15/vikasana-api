@@ -385,9 +385,17 @@ async def admin_get_session_detail(db: AsyncSession, session_id: int) -> dict:
 # APPROVE / REJECT
 # ─────────────────────────────────────────────────────────────
 
-async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
+async def admin_approve_session(
+    db: AsyncSession,
+    session_id: int,
+    *,
+    current_admin_id: int | None = None,   # pass from route (recommended)
+) -> dict:
+    # lock session
     res = await db.execute(
-        select(ActivitySession).where(ActivitySession.id == session_id).with_for_update()
+        select(ActivitySession)
+        .where(ActivitySession.id == session_id)
+        .with_for_update()
     )
     s = res.scalar_one_or_none()
     if not s:
@@ -396,26 +404,32 @@ async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
     if s.status not in (ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.FLAGGED):
         raise HTTPException(status_code=400, detail=f"Cannot approve session in status {s.status}")
 
-    # ✅ idempotent points award
-    if getattr(s, "points_processed", False):
+    # ✅ If already awarded, only ensure status is APPROVED and return
+    if getattr(s, "points_awarded_at", None) is not None:
         s.status = ActivitySessionStatus.APPROVED
         s.flag_reason = None
         await db.commit()
+        await db.refresh(s)
         return {
             "id": s.id,
-            "status": "APPROVED",
+            "status": s.status.value,
             "points_awarded_now": 0,
-            "reason": "Already processed",
+            "reason": "Already awarded earlier",
         }
 
+    # mark approved
     s.status = ActivitySessionStatus.APPROVED
     s.flag_reason = None
-    await db.flush()
+    await db.flush()  # keep tx open, do not commit
 
-    # Award (must NOT commit inside)
-    result = await award_points_for_session(db, s.id)
+    # ✅ Award points (this will also insert StudentPointAdjustment row)
+    result = await award_points_for_session(
+        db,
+        s.id,
+        created_by_admin_id=current_admin_id,
+    )
 
-    s.points_processed = True
+    # ✅ Commit once (session + progress + student + adjustments)
     await db.commit()
     await db.refresh(s)
 
@@ -426,6 +440,7 @@ async def admin_approve_session(db: AsyncSession, session_id: int) -> dict:
         "duration_minutes": result.get("duration_minutes"),
         "progress_total_minutes": result.get("total_minutes"),
         "points_awarded_total_for_activity": result.get("points_awarded_total_for_activity"),
+        "student_total_points": result.get("student_total_points"),
     }
 
 

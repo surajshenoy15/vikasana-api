@@ -99,9 +99,12 @@ async def approve_session(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # ✅ admin_approve_session now returns a dict (includes points info)
-    return await admin_approve_session(db=db, session_id=session_id)
-
+    # ✅ pass admin id so StudentPointAdjustment.created_by_admin_id is stored
+    return await admin_approve_session(
+        db=db,
+        session_id=session_id,
+        current_admin_id=getattr(admin, "id", None),
+    )
 
 # ─────────────────────────────────────────────────────────────
 # REJECT

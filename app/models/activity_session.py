@@ -48,8 +48,11 @@ class ActivitySession(Base):
     duration_hours = Column(Float, nullable=True)
     flag_reason = Column(String(500), nullable=True)
 
-    # ✅ NEW: prevents double awarding points
-    points_processed = Column(Boolean, nullable=False, default=False, server_default="false")
+    # ✅ NEW (recommended): timestamp makes it auditable + avoids double-award safely
+    points_awarded_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+    # (optional) keep points_processed only if you already shipped it and want backward compat
+    # points_processed = Column(Boolean, nullable=False, default=False, server_default="false")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
