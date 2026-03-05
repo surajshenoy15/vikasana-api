@@ -1,7 +1,4 @@
-# =========================================================
-# app/schemas/events.py  ✅ FULL UPDATED (CREATE + UPDATE + LOCATION + ACTIVITY TYPES)
-# =========================================================
-
+# app/schemas/events.py  ✅ FULLY UPDATED (models aligned + event geofence + event submission photos gps)
 from __future__ import annotations
 
 from typing import Optional, List, Any
@@ -14,6 +11,9 @@ from pydantic.config import ConfigDict
 # =========================================================
 # ------------------ EVENTS (CREATE / UPDATE / OUT) --------
 # =========================================================
+
+DEFAULT_EVENT_RADIUS_M = 500
+
 
 class EventCreateIn(BaseModel):
     """
@@ -43,7 +43,6 @@ class EventCreateIn(BaseModel):
     # ✅ Event ↔ ActivityType mapping
     activity_type_ids: List[int] = Field(default_factory=list)
 
-    # ✅ Pull ids from alternate frontend keys BEFORE validation
     @model_validator(mode="before")
     @classmethod
     def _normalize_activity_keys(cls, data: Any):
@@ -55,10 +54,8 @@ class EventCreateIn(BaseModel):
                 if k in data and data.get(k) is not None:
                     data["activity_type_ids"] = data.get(k)
                     break
-
         return data
 
-    # ✅ Convert any shape -> List[int]
     @field_validator("activity_type_ids", mode="before")
     @classmethod
     def _coerce_activity_type_ids(cls, v: Any):
@@ -90,7 +87,7 @@ class EventCreateIn(BaseModel):
                     pass
             return out
 
-        # list of strings/ints: ["6","7"] or [6,7]
+        # list of strings/ints
         if isinstance(v, list):
             out: List[int] = []
             for x in v:
@@ -106,7 +103,7 @@ class EventCreateIn(BaseModel):
 class EventUpdateIn(BaseModel):
     """
     ✅ Used for PUT/PATCH /admin/events/{id}
-    Fixes 422 by making fields optional and supporting partial updates.
+    Partial updates supported (prevents 422).
     """
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -138,13 +135,11 @@ class EventUpdateIn(BaseModel):
         if not isinstance(data, dict):
             return data
 
-        # if frontend uses alternate keys, map them in
         if "activity_type_ids" not in data or data.get("activity_type_ids") is None:
             for k in ["activityTypeIds", "activityTypes", "activity_types", "activity_type_id", "activity_list"]:
                 if k in data and data.get(k) is not None:
                     data["activity_type_ids"] = data.get(k)
                     break
-
         return data
 
     @field_validator("activity_type_ids", mode="before")
@@ -154,7 +149,6 @@ class EventUpdateIn(BaseModel):
         if v is None:
             return None
 
-        # "6,7"
         if isinstance(v, str):
             parts = [x.strip() for x in v.split(",") if x.strip()]
             out: List[int] = []
@@ -165,11 +159,9 @@ class EventUpdateIn(BaseModel):
                     pass
             return out
 
-        # single int
         if isinstance(v, int):
             return [v]
 
-        # list of dicts: [{id: 6}, {id: 7}]
         if isinstance(v, list) and v and isinstance(v[0], dict):
             out: List[int] = []
             for obj in v:
@@ -179,7 +171,6 @@ class EventUpdateIn(BaseModel):
                     pass
             return out
 
-        # list of strings/ints
         if isinstance(v, list):
             out: List[int] = []
             for x in v:
@@ -235,25 +226,34 @@ class RegisterOut(BaseModel):
 
 
 # =========================================================
-# ------------------ PHOTOS -------------------------------
+# ------------------ PHOTOS (EVENT SUBMISSION PHOTOS) ------
 # =========================================================
 
-class PhotoOut(BaseModel):
+class EventSubmissionPhotoOut(BaseModel):
+    """
+    ✅ Matches app/models/events.py -> EventSubmissionPhoto
+    """
     id: int
-    session_id: int
-    student_id: int
+    submission_id: int
     seq_no: int
     image_url: str
-    captured_at: datetime
-    lat: float
-    lng: float
+
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+    distance_m: Optional[float] = None
+    is_in_geofence: Optional[bool] = None
+
+    created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
 
 class PhotosUploadOut(BaseModel):
-    session_id: int
-    photos: List[PhotoOut]
+    """
+    ✅ Used by POST /student/submissions/{submission_id}/photos
+    """
+    submission_id: int
+    photos: List[EventSubmissionPhotoOut]
 
 
 # =========================================================
@@ -267,8 +267,11 @@ class FinalSubmitIn(BaseModel):
 class SubmissionOut(BaseModel):
     id: int
     event_id: int
+    student_id: int
     status: str
     description: Optional[str] = None
+    created_at: datetime
+    submitted_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -280,18 +283,22 @@ class AdminSubmissionOut(BaseModel):
     status: str
     description: Optional[str] = None
 
+    created_at: datetime
     submitted_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
 
-    # ✅ Face/flag meta
+    # ✅ optional meta (if your controller adds them)
     face_matched: Optional[bool] = None
     face_reason: Optional[str] = None
     cosine_score: Optional[float] = None
     flag_reason: Optional[str] = None
 
+    # ✅ Include photos if you want to return them in admin list/detail
+    photos: Optional[List[EventSubmissionPhotoOut]] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 
 class RejectIn(BaseModel):
-    reason: str
+    reason: str = Field(..., min_length=1)
