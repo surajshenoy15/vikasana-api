@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
 from sqlalchemy.orm import selectinload
-
+from app.models.student_point_adjustment import StudentPointAdjustment
+from typing import Literal
 from app.core.database import get_db
 from app.core.dependencies import get_current_faculty, get_current_admin, get_current_student
 from app.models.faculty import Faculty
@@ -435,7 +436,64 @@ async def update_student_admin(
         certificates_count=int(certificates_count),
     )
 
+class ManualActivityPointsIn(BaseModel):
+    mode: Literal["SET_TOTAL", "ADD"] = "SET_TOTAL"
+    value: int
+    reason: str
 
+@admin_router.patch("/{student_id}/activity-points")
+async def admin_update_student_activity_points(
+    student_id: int,
+    payload: ManualActivityPointsIn,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    res = await db.execute(
+        select(Student).where(Student.id == student_id).with_for_update()
+    )
+    s = res.scalar_one_or_none()
+    if not s:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    old_total = int(s.total_points_earned or 0)
+
+    mode = (payload.mode or "SET_TOTAL").upper().strip()
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="reason is required")
+
+    if mode == "SET_TOTAL":
+        new_total = int(payload.value)
+        delta = new_total - old_total
+    elif mode == "ADD":
+        delta = int(payload.value)
+        new_total = old_total + delta
+    else:
+        raise HTTPException(status_code=422, detail="mode must be SET_TOTAL or ADD")
+
+    if new_total < 0:
+        raise HTTPException(status_code=422, detail="total points cannot be negative")
+
+    s.total_points_earned = int(new_total)
+
+    db.add(
+        StudentPointAdjustment(
+            student_id=s.id,
+            delta_points=int(delta),
+            new_total_points=int(new_total),
+            reason=reason,
+            created_by_admin_id=getattr(current_admin, "id", None),
+        )
+    )
+
+    await db.commit()
+
+    return {
+        "student_id": s.id,
+        "old_total": old_total,
+        "new_total": int(new_total),
+        "delta": int(delta),
+    }
 # ─────────────────────────────────────────────────────────────
 # STUDENT ROUTES (PROFILE)
 # ─────────────────────────────────────────────────────────────
