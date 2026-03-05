@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_admin
+
 from app.models.activity_session import ActivitySessionStatus
 
 from app.controllers.admin_sessions_controller import (
@@ -18,48 +19,52 @@ from app.controllers.admin_sessions_controller import (
     admin_reject_session,
 )
 
-router = APIRouter(prefix="/admin/sessions", tags=["Admin - Sessions"])
-
+router = APIRouter(
+    prefix="/admin/sessions",
+    tags=["Admin - Sessions"],
+)
 
 # ─────────────────────────────────────────────────────────────
-# LIST
+# LIST SESSIONS
 # ─────────────────────────────────────────────────────────────
-
-# app/routes/admin_sessions.py
 
 @router.get("")
 async def list_sessions(
     status: Optional[str] = Query(
         None,
         description=(
-            "Filter by status. Omit for Queue (SUBMITTED+FLAGGED). "
-            "Use 'ALL' for no status filter. "
-            "Other: SUBMITTED | FLAGGED | APPROVED | REJECTED | DRAFT | EXPIRED"
+            "Filter by status. "
+            "Default queue = SUBMITTED + FLAGGED. "
+            "Use 'ALL' to disable status filter."
         ),
     ),
-    q: Optional[str] = Query(None, description="Search by activity name or session code"),
+    q: Optional[str] = Query(
+        None,
+        description="Search by activity name or session code",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
     parsed_status: Optional[ActivitySessionStatus] = None
-    include_all = False  # ✅ NEW
+    include_all = False
 
     if status:
         s = status.upper().strip()
+
         if s == "ALL":
-            include_all = True  # ✅ means NO FILTER
+            include_all = True
         else:
             try:
                 parsed_status = ActivitySessionStatus(s)
             except ValueError:
-                parsed_status = None  # invalid -> fallback queue
+                parsed_status = None
 
     return await admin_list_sessions(
         db=db,
         status=parsed_status,
-        include_all=include_all,  # ✅ NEW
+        include_all=include_all,
         q=q,
         limit=limit,
         offset=offset,
@@ -67,7 +72,7 @@ async def list_sessions(
 
 
 # ─────────────────────────────────────────────────────────────
-# GET DETAIL
+# SESSION DETAIL
 # ─────────────────────────────────────────────────────────────
 
 @router.get("/{session_id}")
@@ -77,20 +82,24 @@ async def get_session_detail(
     admin=Depends(get_current_admin),
 ):
     """
-    Full session detail including:
-    - Student info (name, USN, college, face_enrolled)
-    - Activity type details + point calculation
-    - in_time / out_time
-    - Photos with presigned URLs + per-photo face + geo info
-    - Location trail (all lat/lng points ordered by time)
-    - Latest face check with presigned processed image
-    - Target location from activity type
+    Returns full session detail including:
+
+    • student info  
+    • activity type details  
+    • session timestamps  
+    • activity photos  
+    • GPS trail  
+    • face verification results  
     """
-    return await admin_get_session_detail(db=db, session_id=session_id)
+
+    return await admin_get_session_detail(
+        db=db,
+        session_id=session_id,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
-# APPROVE
+# APPROVE SESSION
 # ─────────────────────────────────────────────────────────────
 
 @router.post("/{session_id}/approve")
@@ -99,19 +108,28 @@ async def approve_session(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    # ✅ pass admin id so StudentPointAdjustment.created_by_admin_id is stored
+    """
+    Approves activity session and awards points.
+    Admin id is stored in StudentPointAdjustment table.
+    """
+
     return await admin_approve_session(
         db=db,
         session_id=session_id,
         current_admin_id=getattr(admin, "id", None),
     )
 
+
 # ─────────────────────────────────────────────────────────────
-# REJECT
+# REJECT SESSION
 # ─────────────────────────────────────────────────────────────
 
 class RejectBody(BaseModel):
-    reason: str = Field(..., min_length=1, description="Rejection reason shown to student")
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description="Reason shown to student",
+    )
 
 
 @router.post("/{session_id}/reject")
@@ -121,9 +139,16 @@ async def reject_session(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    s = await admin_reject_session(db=db, session_id=session_id, reason=payload.reason)
+    session = await admin_reject_session(
+        db=db,
+        session_id=session_id,
+        reason=payload.reason,
+    )
+
     return {
-        "id": s.id,
-        "status": s.status.value if hasattr(s.status, "value") else str(s.status),
-        "flag_reason": s.flag_reason,
+        "id": session.id,
+        "status": session.status.value
+        if hasattr(session.status, "value")
+        else str(session.status),
+        "flag_reason": session.flag_reason,
     }
