@@ -496,6 +496,7 @@ async def admin_update_student_activity_points(
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
+    # ✅ IMPORTANT: lock ONLY student row (NO joins / no selectinload here)
     res = await db.execute(
         select(Student).where(Student.id == student_id).with_for_update()
     )
@@ -504,7 +505,7 @@ async def admin_update_student_activity_points(
         raise HTTPException(status_code=404, detail="Student not found")
 
     old_total = int(s.total_points_earned or 0)
-    mode = payload.mode
+    mode = (payload.mode or "").strip().upper()
 
     if mode == "SET_TOTAL":
         if payload.new_total is None:
@@ -517,15 +518,12 @@ async def admin_update_student_activity_points(
             raise HTTPException(status_code=422, detail="delta is required for ADD/SUBTRACT")
         d = int(payload.delta)
 
-        # If mode is SUBTRACT, force negative
         if mode == "SUBTRACT":
             d = -abs(d)
-
-        # If mode is ADD, force positive
-        if mode == "ADD":
+        elif mode == "ADD":
             d = abs(d)
+        # ADD_SUBTRACT keeps sign as given
 
-        # If ADD_SUBTRACT, allow + or -
         delta = d
         new_total = old_total + delta
 
@@ -554,8 +552,7 @@ async def admin_update_student_activity_points(
         "old_total": old_total,
         "new_total": int(new_total),
         "delta": int(delta),
-    }
-# ─────────────────────────────────────────────────────────────
+    }# ─────────────────────────────────────────────────────────────
 # STUDENT ROUTES (PROFILE)
 # ─────────────────────────────────────────────────────────────
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])
