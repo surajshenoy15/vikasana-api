@@ -1629,6 +1629,26 @@ async def add_photo(
     return photo
 
 
+async def _trigger_face_verification_for_submission(submission_id: int) -> dict:
+    """
+    Calls the face verification endpoint internally after submission
+    to run the actual OpenCV face matching pipeline.
+    """
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"http://localhost:8000/api/face/verify-event-submission/{submission_id}"
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            print(f"[face-verify] HTTP {resp.status_code}: {resp.text}")
+            return {"matched": False, "reason": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        print(f"[face-verify] Error for submission {submission_id}: {e}")
+        return {"matched": False, "reason": str(e)}
+
+
 async def final_submit(db: AsyncSession, submission_id: int, student_id: int, description: str):
     q = await db.execute(
         select(EventSubmission).where(
@@ -1670,7 +1690,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     now_utc = datetime.now(timezone.utc)
 
-    # Step 1: mark as submitted first
+    # Step 1: mark as submitted
     submission.status = "submitted"
     submission.description = description
     if hasattr(submission, "submitted_at"):
@@ -1687,41 +1707,22 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         target_status=ActivitySessionStatus.SUBMITTED,
     )
 
-    # Step 3: copy photos
+    # Step 3: copy photos to activity session
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
 
-    # Step 4: create placeholder face rows so UI has an image
+    # Step 4: create placeholder face rows
     for session in sessions:
         await create_face_check_for_activity_session(db, submission, session)
 
-    # Step 5: run backend face verification
-    #
-    # IMPORTANT:
-    # Replace the next line with your REAL backend face verification function.
-    # Example:
-    # face_result = await verify_event_submission_faces(db, submission.id)
-    #
-    # Expected face_result format:
-    # {
-    #   "matched": bool,
-    #   "reason": str | None,
-    #   "cosine_score": float | None,
-    #   "l2_score": float | None,
-    #   "total_faces": int | None,
-    #   "processed_object": str | None,
-    # }
-    #
-    face_result = {
-        "matched": False,
-        "reason": "replace_with_real_backend_face_verification",
-        "cosine_score": None,
-        "l2_score": None,
-        "total_faces": 1,
-        "processed_object": None,
-    }
+    # Step 5: ✅ Run ACTUAL face verification via CV pipeline
+    print(f"[face-verify] Running face verification for submission {submission_id}...")
+    face_result = await _trigger_face_verification_for_submission(submission_id)
+    any_matched = bool(face_result.get("matched", False))
+    print(f"[face-verify] Result: matched={any_matched}, reason={face_result.get('reason')}")
 
-    # Step 6: sync real face result into ActivityFaceCheck
+    # Step 6: Update the ActivityFaceCheck rows with real results
+    processed_object = face_result.get("processed_object")
     for session in sessions:
         photo_res = await db.execute(
             select(ActivityPhoto)
@@ -1729,30 +1730,44 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             .order_by(ActivityPhoto.seq_no.asc())
         )
         chosen_photo = photo_res.scalars().first()
-
         if not chosen_photo:
             continue
 
         fc_res = await db.execute(
-            select(ActivityFaceCheck).where(
+            select(ActivityFaceCheck)
+            .where(
                 ActivityFaceCheck.session_id == session.id,
                 ActivityFaceCheck.photo_id == chosen_photo.id,
             )
+            .order_by(ActivityFaceCheck.id.desc())
         )
         face_check = fc_res.scalar_one_or_none()
 
         if face_check:
-            face_check.matched = bool(face_result.get("matched", False))
-            face_check.reason = face_result.get("reason")
+            face_check.matched = any_matched
             face_check.cosine_score = face_result.get("cosine_score")
             face_check.l2_score = face_result.get("l2_score")
-            face_check.total_faces = int(face_result.get("total_faces") or 1)
-            face_check.processed_object = face_result.get("processed_object")
+            face_check.total_faces = face_result.get("total_faces")
+            face_check.processed_object = processed_object
+            face_check.reason = face_result.get("reason")
+        else:
+            db.add(ActivityFaceCheck(
+                student_id=student_id,
+                session_id=session.id,
+                photo_id=chosen_photo.id,
+                raw_image_url=chosen_photo.image_url,
+                matched=any_matched,
+                cosine_score=face_result.get("cosine_score"),
+                l2_score=face_result.get("l2_score"),
+                total_faces=face_result.get("total_faces"),
+                processed_object=processed_object,
+                reason=face_result.get("reason"),
+            ))
 
     await db.commit()
 
     # Step 7: auto-approve if face matched
-    if bool(face_result.get("matched", False)):
+    if any_matched:
         submission.status = "approved"
         if hasattr(submission, "approved_at"):
             submission.approved_at = datetime.now(timezone.utc)
@@ -1768,6 +1783,9 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
         for session in sessions:
             await copy_event_photos_to_activity_session(db, submission, session)
+
+        for session in sessions:
+            await create_face_check_for_activity_session(db, submission, session)
 
         await _issue_certificates_for_event(db, event)
 
