@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from typing import Any, Optional
 import secrets
 from urllib.parse import quote
+from app.models.activity_face_check import ActivityFaceCheck
 from sqlalchemy import delete
 from typing import List
 from fastapi import HTTPException
@@ -343,6 +344,59 @@ async def copy_event_photos_to_activity_session(
                     geo_flag_reason=None,
                 )
             )
+
+    await db.commit()
+
+async def create_face_check_for_activity_session(
+    db: AsyncSession,
+    submission: EventSubmission,
+    session: ActivitySession,
+):
+    """
+    Create a basic ActivityFaceCheck so Activity Sessions UI can show a face image.
+
+    Uses the first activity photo as the face-check photo.
+    """
+    photo_res = await db.execute(
+        select(ActivityPhoto)
+        .where(ActivityPhoto.session_id == session.id)
+        .order_by(ActivityPhoto.seq_no.asc())
+    )
+    activity_photos = photo_res.scalars().all()
+
+    if not activity_photos:
+        return
+
+    chosen_photo = activity_photos[0]
+
+    existing_res = await db.execute(
+        select(ActivityFaceCheck).where(
+            ActivityFaceCheck.session_id == session.id,
+            ActivityFaceCheck.photo_id == chosen_photo.id,
+        )
+    )
+    existing = existing_res.scalar_one_or_none()
+
+    if existing:
+        if not existing.raw_image_url:
+            existing.raw_image_url = chosen_photo.image_url
+        if existing.student_id != submission.student_id:
+            existing.student_id = submission.student_id
+    else:
+        db.add(
+            ActivityFaceCheck(
+                student_id=submission.student_id,
+                session_id=session.id,
+                photo_id=chosen_photo.id,
+                matched=False,
+                raw_image_url=chosen_photo.image_url,
+                processed_object=None,
+                reason="event_submission_import",
+                cosine_score=None,
+                l2_score=None,
+                total_faces=None,
+            )
+        )
 
     await db.commit()
 async def create_or_update_activity_session_from_submission(
@@ -1418,19 +1472,8 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
 
-    await _issue_certificates_for_event(db, event)
-
-    q = await db.execute(
-        select(EventSubmission)
-        .options(selectinload(EventSubmission.photos))
-        .where(EventSubmission.id == submission_id)
-    )
-    submission = q.scalar_one()
-
-    return submission
-
     for session in sessions:
-        await copy_event_photos_to_activity_session(db, submission, session)
+        await create_face_check_for_activity_session(db, submission, session)
 
     await _issue_certificates_for_event(db, event)
 
@@ -1630,7 +1673,6 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     await db.commit()
     await db.refresh(submission)
 
-    # ✅ Create/update linked activity session as SUBMITTED
     sessions = await create_or_update_activity_session_from_submission(
         db=db,
         submission=submission,
@@ -1638,9 +1680,11 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         target_status=ActivitySessionStatus.SUBMITTED,
     )
 
-    # ✅ Copy event photos into activity session
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
+
+    for session in sessions:
+        await create_face_check_for_activity_session(db, submission, session)
 
     await db.refresh(submission)
     return submission
