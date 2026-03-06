@@ -50,6 +50,10 @@ class StudentUpdate(BaseModel):
     admitted_year: Optional[int] = None
 
 
+class StudentPointsUpdate(BaseModel):
+    total_points_earned: int
+
+
 def _normalize_student_type(v: str | None) -> str | None:
     if v is None:
         return None
@@ -317,47 +321,6 @@ async def list_students_admin(
     ]
 
 
-@admin_router.get("/{student_id}", response_model=StudentOut)
-async def get_student_admin(
-    student_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_admin: Admin = Depends(get_current_admin),
-):
-    activities_count_sq = (
-        select(func.count(EventSubmission.id))
-        .where(EventSubmission.student_id == student_id)
-        .scalar_subquery()
-    )
-
-    certificates_count_sq = (
-        select(func.count(Certificate.id))
-        .where(Certificate.student_id == student_id)
-        .scalar_subquery()
-    )
-
-    stmt = (
-        select(
-            Student,
-            func.coalesce(activities_count_sq, 0).label("activities_count"),
-            func.coalesce(certificates_count_sq, 0).label("certificates_count"),
-        )
-        .options(selectinload(Student.created_by_faculty))
-        .where(Student.id == student_id)
-    )
-
-    res = await db.execute(stmt)
-    row = res.first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Student not found")
-
-    s, activities_count, certificates_count = row
-    return _student_out(
-        s,
-        activities_count=int(activities_count or 0),
-        certificates_count=int(certificates_count or 0),
-    )
-
-
 @admin_router.patch("/{student_id}", response_model=StudentOut)
 async def update_student_admin(
     student_id: int,
@@ -426,6 +389,31 @@ async def update_student_admin(
         activities_count=int(activities_count),
         certificates_count=int(certificates_count),
     )
+
+
+@admin_router.patch("/{student_id}/points")
+async def update_student_points_admin(
+    student_id: int,
+    payload: StudentPointsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    s = await db.get(Student, student_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    if payload.total_points_earned < 0:
+        raise HTTPException(status_code=400, detail="Points cannot be negative")
+
+    s.total_points_earned = int(payload.total_points_earned)
+
+    await db.commit()
+    await db.refresh(s)
+
+    return {
+        "id": s.id,
+        "total_points_earned": int(s.total_points_earned or 0),
+    }
 
 
 # ─────────────────────────────────────────────────────────────
