@@ -1274,7 +1274,11 @@ async def list_event_submissions(db: AsyncSession, event_id: int):
 
 
 async def approve_submission(db: AsyncSession, submission_id: int):
-    q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
+    q = await db.execute(
+        select(EventSubmission)
+        .options(selectinload(EventSubmission.photos))
+        .where(EventSubmission.id == submission_id)
+    )
     submission = q.scalar_one_or_none()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1287,17 +1291,36 @@ async def approve_submission(db: AsyncSession, submission_id: int):
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
-    await db.refresh(submission)
+
+    # reload with photos eagerly loaded to avoid MissingGreenlet during response serialization
+    q = await db.execute(
+        select(EventSubmission)
+        .options(selectinload(EventSubmission.photos))
+        .where(EventSubmission.id == submission_id)
+    )
+    submission = q.scalar_one()
 
     event = await db.get(Event, submission.event_id)
     if event:
         await _issue_certificates_for_event(db, event)
 
+        # reload once more in case certificate logic touched session state
+        q = await db.execute(
+            select(EventSubmission)
+            .options(selectinload(EventSubmission.photos))
+            .where(EventSubmission.id == submission_id)
+        )
+        submission = q.scalar_one()
+
     return submission
 
 
 async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
-    q = await db.execute(select(EventSubmission).where(EventSubmission.id == submission_id))
+    q = await db.execute(
+        select(EventSubmission)
+        .options(selectinload(EventSubmission.photos))
+        .where(EventSubmission.id == submission_id)
+    )
     submission = q.scalar_one_or_none()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
@@ -1310,7 +1333,15 @@ async def reject_submission(db: AsyncSession, submission_id: int, reason: str):
         submission.rejection_reason = reason
 
     await db.commit()
-    await db.refresh(submission)
+
+    # reload with photos eagerly loaded to avoid MissingGreenlet during response serialization
+    q = await db.execute(
+        select(EventSubmission)
+        .options(selectinload(EventSubmission.photos))
+        .where(EventSubmission.id == submission_id)
+    )
+    submission = q.scalar_one()
+
     return submission
 
 
