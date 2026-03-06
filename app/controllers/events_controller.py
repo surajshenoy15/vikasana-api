@@ -13,7 +13,8 @@ from sqlalchemy import select, func, delete as sql_delete, update, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-from app.models.activity import ActivitySession, ActivityPhoto
+from app.models.activity_photo import ActivityPhoto
+from app.models.activity_session import ActivitySession, ActivitySessionStatus
 from app.core.config import settings
 from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
