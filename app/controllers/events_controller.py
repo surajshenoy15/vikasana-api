@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, date as date_type, time as time_type, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Optional
+import secrets
 from urllib.parse import quote
 from sqlalchemy import delete
 from typing import List
@@ -294,6 +295,59 @@ async def get_student_event_draft_progress(db: AsyncSession, student_id: int, ev
         "is_complete": is_complete,
         "photos": [{"seq_no": int(r[0]), "image_url": r[1]} for r in rows],
     }
+
+async def create_or_approve_activity_session_from_submission(
+    db: AsyncSession,
+    submission: EventSubmission,
+    event: Event,
+):
+    activity_type_ids = await _get_event_activity_type_ids(db, event.id)
+    if not activity_type_ids:
+        return
+
+    start_utc, end_utc = _event_window_utc(event)
+    now_utc = datetime.now(timezone.utc)
+
+    for at_id in activity_type_ids:
+        q = await db.execute(
+            select(ActivitySession).where(
+                ActivitySession.student_id == submission.student_id,
+                ActivitySession.activity_type_id == at_id,
+                ActivitySession.started_at <= end_utc,
+                func.coalesce(ActivitySession.submitted_at, ActivitySession.expires_at, end_utc) >= start_utc,
+            )
+        )
+        session = q.scalar_one_or_none()
+
+        if session:
+            session.status = ActivitySessionStatus.APPROVED
+            if session.submitted_at is None:
+                session.submitted_at = now_utc
+
+            if session.duration_hours is None:
+                session.duration_hours = max(
+                    0.0,
+                    (end_utc - start_utc).total_seconds() / 3600.0
+                )
+        else:
+            session = ActivitySession(
+                student_id=submission.student_id,
+                activity_type_id=at_id,
+                activity_name=getattr(event, "title", "Event Activity"),
+                description=getattr(submission, "description", None),
+                session_code=secrets.token_hex(8),
+                started_at=start_utc,
+                expires_at=end_utc,
+                submitted_at=now_utc,
+                status=ActivitySessionStatus.APPROVED,
+                duration_hours=max(
+                    0.0,
+                    (end_utc - start_utc).total_seconds() / 3600.0
+                ),
+            )
+            db.add(session)
+
+    await db.commit()
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -1272,7 +1326,6 @@ async def list_event_submissions(db: AsyncSession, event_id: int):
     )
     return q.scalars().all()
 
-
 async def approve_submission(db: AsyncSession, submission_id: int):
     q = await db.execute(
         select(EventSubmission)
@@ -1286,31 +1339,45 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if submission.status != "submitted":
         raise HTTPException(status_code=400, detail="Only submitted items can be approved")
 
+    event = await db.get(Event, submission.event_id)
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    # -----------------------------
+    # FACE RECOGNITION PLACE
+    # -----------------------------
+    # Add your face verification here later
+    # Example:
+    # face_ok = await verify_submission_faces(db, submission)
+    # if not face_ok:
+    #     raise HTTPException(status_code=400, detail="Face recognition failed")
+
+    # -----------------------------
+    # APPROVE SUBMISSION
+    # -----------------------------
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
 
-    # reload with photos eagerly loaded to avoid MissingGreenlet during response serialization
+    # -----------------------------
+    # CREATE/APPROVE ACTIVITY SESSION
+    # -----------------------------
+    await create_or_approve_activity_session_from_submission(db, submission, event)
+
+    # -----------------------------
+    # GENERATE CERTIFICATE
+    # -----------------------------
+    await _issue_certificates_for_event(db, event)
+
+    # reload with photos eagerly loaded
     q = await db.execute(
         select(EventSubmission)
         .options(selectinload(EventSubmission.photos))
         .where(EventSubmission.id == submission_id)
     )
     submission = q.scalar_one()
-
-    event = await db.get(Event, submission.event_id)
-    if event:
-        await _issue_certificates_for_event(db, event)
-
-        # reload once more in case certificate logic touched session state
-        q = await db.execute(
-            select(EventSubmission)
-            .options(selectinload(EventSubmission.photos))
-            .where(EventSubmission.id == submission_id)
-        )
-        submission = q.scalar_one()
 
     return submission
 
