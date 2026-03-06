@@ -9,13 +9,15 @@ from app.models.student_activity_progress import StudentActivityProgress
 from app.models.student_point_adjustment import StudentPointAdjustment
 
 
+# ─────────────────────────────────────────────
+# Existing auto-award logic
+# ─────────────────────────────────────────────
 async def award_points_for_session(
     db: AsyncSession,
     session_id: int,
     *,
-    created_by_admin_id: int | None = None,  # optional (pass from approve endpoint)
+    created_by_admin_id: int | None = None,
 ) -> dict:
-    # 1) Load + lock session (prevents double-award in concurrent calls)
     res = await db.execute(
         select(ActivitySession)
         .where(ActivitySession.id == session_id)
@@ -25,16 +27,12 @@ async def award_points_for_session(
     if not session:
         raise ValueError("Session not found")
 
-    # ✅ Idempotency: if already processed once, do nothing
-    # (requires ActivitySession.points_awarded_at column)
     if getattr(session, "points_awarded_at", None) is not None:
         return {"awarded": 0, "reason": "Points already awarded for this session"}
 
-    # Only award when session is SUBMITTED or APPROVED
     if session.status not in {ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED}:
         return {"awarded": 0, "reason": f"Session status is {session.status}, not eligible"}
 
-    # 2) Get photos seq 1 and seq 5
     q = select(ActivityPhoto).where(
         ActivityPhoto.session_id == session_id,
         ActivityPhoto.seq_no.in_([1, 5]),
@@ -52,15 +50,12 @@ async def award_points_for_session(
     if not t1 or not t5 or t5 <= t1:
         return {"awarded": 0, "reason": "Invalid timestamps for duration"}
 
-    # 3) Duration in minutes
     duration_minutes = int((t5 - t1).total_seconds() // 60)
     if duration_minutes <= 0:
         return {"awarded": 0, "reason": "Duration too small"}
 
-    # Store duration in session (optional but useful)
     session.duration_hours = round(duration_minutes / 60.0, 2)
 
-    # 4) Load activity rule
     activity_type = await db.get(ActivityType, session.activity_type_id)
     if not activity_type or not getattr(activity_type, "is_active", True):
         return {"awarded": 0, "reason": "Activity type not active"}
@@ -72,7 +67,6 @@ async def award_points_for_session(
     if unit_minutes <= 0 or unit_points <= 0:
         return {"awarded": 0, "reason": "Invalid activity rule config"}
 
-    # 5) Get or create progress row (lock it)
     prog_q = (
         select(StudentActivityProgress)
         .where(
@@ -93,10 +87,8 @@ async def award_points_for_session(
         db.add(prog)
         await db.flush()
 
-    # ✅ Important: this must be protected by idempotency above
     prog.total_minutes = int(prog.total_minutes or 0) + duration_minutes
 
-    # 6) Compute points that should exist after update (respect max_points)
     should_have = (prog.total_minutes // unit_minutes) * unit_points
     if should_have > max_points:
         should_have = max_points
@@ -107,7 +99,6 @@ async def award_points_for_session(
 
     student_total = None
 
-    # 7) Apply delta to student total (lock student row too)
     if new_points > 0:
         stu_q = select(Student).where(Student.id == session.student_id).with_for_update()
         student = (await db.execute(stu_q)).scalars().first()
@@ -119,7 +110,6 @@ async def award_points_for_session(
 
         prog.points_awarded = int(should_have)
 
-        # ✅ Store adjustment row in DB
         db.add(
             StudentPointAdjustment(
                 student_id=student.id,
@@ -127,14 +117,15 @@ async def award_points_for_session(
                 new_total_points=student_total,
                 reason=f"AUTO_AWARD_SESSION_{session.id}",
                 created_by_admin_id=created_by_admin_id,
+                activity_name=f"Session #{session.id}",
+                category="Auto Award",
+                status="approved",
+                remarks=f"Auto awarded from session {session.id}",
             )
         )
 
-    # ✅ CRITICAL FIX:
-    # Mark session as processed EVEN if new_points == 0 (prevents minutes being added again on re-approve)
     session.points_awarded_at = func.now()
 
-    # ✅ DO NOT COMMIT HERE — caller commits
     return {
         "awarded": int(new_points),
         "duration_minutes": int(duration_minutes),
@@ -142,3 +133,159 @@ async def award_points_for_session(
         "points_awarded_total_for_activity": int(prog.points_awarded),
         "student_total_points": student_total,
     }
+
+
+# ─────────────────────────────────────────────
+# Admin manual CRUD for point adjustments
+# ─────────────────────────────────────────────
+async def get_student_point_adjustments(
+    db: AsyncSession,
+    student_id: int,
+) -> tuple[Student, list[StudentPointAdjustment]]:
+    student = await db.get(Student, student_id)
+    if not student:
+        raise ValueError("Student not found")
+
+    res = await db.execute(
+        select(StudentPointAdjustment)
+        .where(StudentPointAdjustment.student_id == student_id)
+        .order_by(StudentPointAdjustment.created_at.desc(), StudentPointAdjustment.id.desc())
+    )
+    items = res.scalars().all()
+    return student, items
+
+
+async def create_student_point_adjustment(
+    db: AsyncSession,
+    *,
+    student_id: int,
+    activity_name: str,
+    category: str | None,
+    points: int,
+    date,
+    status: str,
+    remarks: str | None,
+    created_by_admin_id: int | None,
+) -> tuple[StudentPointAdjustment, int]:
+    student_res = await db.execute(
+        select(Student).where(Student.id == student_id).with_for_update()
+    )
+    student = student_res.scalar_one_or_none()
+    if not student:
+        raise ValueError("Student not found")
+
+    new_total = int(student.total_points_earned or 0) + int(points)
+    if new_total < 0:
+        raise ValueError("Resulting total points cannot be negative")
+
+    student.total_points_earned = new_total
+
+    item = StudentPointAdjustment(
+        student_id=student.id,
+        delta_points=int(points),
+        new_total_points=new_total,
+        reason=remarks,
+        created_by_admin_id=created_by_admin_id,
+        activity_name=activity_name.strip(),
+        category=category.strip() if category else None,
+        activity_date=date,
+        status=status,
+        remarks=remarks.strip() if remarks else None,
+    )
+    db.add(item)
+    await db.flush()
+    await db.refresh(item)
+
+    return item, new_total
+
+
+async def update_student_point_adjustment(
+    db: AsyncSession,
+    *,
+    adjustment_id: int,
+    activity_name: str | None,
+    category: str | None,
+    points: int | None,
+    date,
+    status: str | None,
+    remarks: str | None,
+) -> tuple[StudentPointAdjustment, int]:
+    adj_res = await db.execute(
+        select(StudentPointAdjustment)
+        .where(StudentPointAdjustment.id == adjustment_id)
+        .with_for_update()
+    )
+    adj = adj_res.scalar_one_or_none()
+    if not adj:
+        raise ValueError("Activity point entry not found")
+
+    student_res = await db.execute(
+        select(Student).where(Student.id == adj.student_id).with_for_update()
+    )
+    student = student_res.scalar_one_or_none()
+    if not student:
+        raise ValueError("Student not found")
+
+    old_points = int(adj.delta_points or 0)
+    new_points = int(points) if points is not None else old_points
+    delta_diff = new_points - old_points
+
+    new_total = int(student.total_points_earned or 0) + delta_diff
+    if new_total < 0:
+        raise ValueError("Resulting total points cannot be negative")
+
+    student.total_points_earned = new_total
+
+    if activity_name is not None:
+        adj.activity_name = activity_name.strip()
+    if category is not None:
+        adj.category = category.strip() or None
+    if status is not None:
+        adj.status = status
+    if remarks is not None:
+        adj.remarks = remarks.strip() or None
+        adj.reason = remarks.strip() or None
+    if points is not None:
+        adj.delta_points = new_points
+    if date is not None:
+        adj.activity_date = date
+
+    adj.new_total_points = new_total
+
+    await db.flush()
+    await db.refresh(adj)
+
+    return adj, new_total
+
+
+async def delete_student_point_adjustment(
+    db: AsyncSession,
+    *,
+    adjustment_id: int,
+) -> int:
+    adj_res = await db.execute(
+        select(StudentPointAdjustment)
+        .where(StudentPointAdjustment.id == adjustment_id)
+        .with_for_update()
+    )
+    adj = adj_res.scalar_one_or_none()
+    if not adj:
+        raise ValueError("Activity point entry not found")
+
+    student_res = await db.execute(
+        select(Student).where(Student.id == adj.student_id).with_for_update()
+    )
+    student = student_res.scalar_one_or_none()
+    if not student:
+        raise ValueError("Student not found")
+
+    new_total = int(student.total_points_earned or 0) - int(adj.delta_points or 0)
+    if new_total < 0:
+        new_total = 0
+
+    student.total_points_earned = new_total
+
+    await db.delete(adj)
+    await db.flush()
+
+    return new_total

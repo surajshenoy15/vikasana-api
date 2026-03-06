@@ -1,34 +1,43 @@
 # app/routes/students.py
-# ✅ Fully updated to return REAL counts:
-# - activities_count = COUNT(EventSubmission)  (your "activities" are event submissions)
-# - certificates_count = COUNT(Certificate)
 
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
-from pydantic import BaseModel, Field, model_validator, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_, func
 from sqlalchemy.orm import selectinload
-from app.models.student_point_adjustment import StudentPointAdjustment
-from typing import Literal,Any
+
 from app.core.database import get_db
 from app.core.dependencies import get_current_faculty, get_current_admin, get_current_student
 from app.models.faculty import Faculty
 from app.models.admin import Admin
 from app.models.student import Student, StudentType
-
-# ✅ REAL sources for counts (matches your Certificate model)
 from app.models.events import EventSubmission
 from app.models.certificate import Certificate
 
-from app.schemas.student import StudentCreate, StudentOut, BulkUploadResult
 from app.controllers.student_controller import create_student, create_students_from_csv
+from app.controllers.activity_points_controller import (
+    get_student_point_adjustments,
+    create_student_point_adjustment,
+    update_student_point_adjustment,
+    delete_student_point_adjustment,
+)
 
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
+from app.schemas.student import (
+    StudentCreate,
+    StudentOut,
+    BulkUploadResult,
+    StudentPointAdjustmentCreate,
+    StudentPointAdjustmentUpdate,
+    StudentPointAdjustmentOut,
+    StudentPointAdjustmentListOut,
+    StudentPointAdjustmentWriteResponse,
+)
+
 
 # ─────────────────────────────────────────────────────────────
-# SCHEMA (PATCH) - matches your Student model (NO is_active field)
+# PATCH SCHEMA
 # ─────────────────────────────────────────────────────────────
 class StudentUpdate(BaseModel):
     college: Optional[str] = None
@@ -36,7 +45,7 @@ class StudentUpdate(BaseModel):
     usn: Optional[str] = None
     branch: Optional[str] = None
     email: Optional[EmailStr] = None
-    student_type: Optional[str] = None  # REGULAR / DIPLOMA
+    student_type: Optional[str] = None
     passout_year: Optional[int] = None
     admitted_year: Optional[int] = None
 
@@ -48,6 +57,42 @@ def _normalize_student_type(v: str | None) -> str | None:
     if v not in (StudentType.REGULAR.value, StudentType.DIPLOMA.value):
         raise HTTPException(status_code=422, detail="student_type must be REGULAR or DIPLOMA")
     return v
+
+
+def _student_out(
+    s: Student,
+    *,
+    activities_count: int = 0,
+    certificates_count: int = 0,
+) -> StudentOut:
+    return StudentOut(
+        id=s.id,
+        name=s.name,
+        usn=s.usn,
+        branch=s.branch,
+        email=s.email,
+        student_type=str(s.student_type),
+        passout_year=s.passout_year,
+        admitted_year=s.admitted_year,
+        college=s.college,
+        faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        activities_count=int(activities_count or 0),
+        certificates_count=int(certificates_count or 0),
+        total_points_earned=int(s.total_points_earned or 0),
+    )
+
+
+def _point_item_out(item) -> StudentPointAdjustmentOut:
+    return StudentPointAdjustmentOut(
+        id=item.id,
+        activity_name=item.activity_name or "Manual Points",
+        category=item.category,
+        points=int(item.delta_points or 0),
+        date=item.activity_date,
+        status=item.status or "approved",
+        remarks=item.remarks or item.reason,
+        created_at=item.created_at,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -68,7 +113,6 @@ async def list_students(
     db: AsyncSession = Depends(get_db),
     current_faculty: Faculty = Depends(get_current_faculty),
 ):
-    # ✅ activities = event submissions
     activities_sq = (
         select(
             EventSubmission.student_id.label("student_id"),
@@ -78,7 +122,6 @@ async def list_students(
         .subquery()
     )
 
-    # ✅ certificates = certificates table
     certs_sq = (
         select(
             Certificate.student_id.label("student_id"),
@@ -129,17 +172,8 @@ async def list_students(
     rows = result.all()
 
     return [
-        StudentOut(
-            id=s.id,
-            name=s.name,
-            usn=s.usn,
-            branch=s.branch,
-            email=s.email,
-            student_type=str(s.student_type),
-            passout_year=s.passout_year,
-            admitted_year=s.admitted_year,
-            college=s.college,
-            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        _student_out(
+            s,
             activities_count=int(activities_count or 0),
             certificates_count=int(certificates_count or 0),
         )
@@ -160,20 +194,7 @@ async def add_student_manual(
             faculty_college=current_faculty.college,
             faculty_id=current_faculty.id,
         )
-        return StudentOut(
-            id=s.id,
-            name=s.name,
-            usn=s.usn,
-            branch=s.branch,
-            email=s.email,
-            student_type=str(s.student_type),
-            passout_year=s.passout_year,
-            admitted_year=s.admitted_year,
-            college=s.college,
-            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
-            activities_count=0,
-            certificates_count=0,
-        )
+        return _student_out(s, activities_count=0, certificates_count=0)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -208,7 +229,7 @@ async def add_students_bulk(
 
 
 # ─────────────────────────────────────────────────────────────
-# ADMIN ROUTES (LIST + GET BY ID + PATCH)
+# ADMIN ROUTES
 # ─────────────────────────────────────────────────────────────
 admin_router = APIRouter(prefix="/admin/students", tags=["Admin - Students"])
 
@@ -287,17 +308,8 @@ async def list_students_admin(
     rows = result.all()
 
     return [
-        StudentOut(
-            id=s.id,
-            name=s.name,
-            usn=s.usn,
-            branch=s.branch,
-            email=s.email,
-            student_type=str(s.student_type),
-            passout_year=s.passout_year,
-            admitted_year=s.admitted_year,
-            college=s.college,
-            faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+        _student_out(
+            s,
             activities_count=int(activities_count or 0),
             certificates_count=int(certificates_count or 0),
         )
@@ -339,18 +351,8 @@ async def get_student_admin(
         raise HTTPException(status_code=404, detail="Student not found")
 
     s, activities_count, certificates_count = row
-
-    return StudentOut(
-        id=s.id,
-        name=s.name,
-        usn=s.usn,
-        branch=s.branch,
-        email=s.email,
-        student_type=str(s.student_type),
-        passout_year=s.passout_year,
-        admitted_year=s.admitted_year,
-        college=s.college,
-        faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+    return _student_out(
+        s,
         activities_count=int(activities_count or 0),
         certificates_count=int(certificates_count or 0),
     )
@@ -374,7 +376,6 @@ async def update_student_admin(
 
     data = payload.model_dump(exclude_unset=True)
 
-    # normalize fields
     if "name" in data and data["name"] is not None:
         data["name"] = str(data["name"]).strip()
     if "college" in data and data["college"] is not None:
@@ -388,7 +389,6 @@ async def update_student_admin(
     if "student_type" in data:
         data["student_type"] = _normalize_student_type(data.get("student_type"))
 
-    # uniqueness checks (your DB constraints are GLOBAL)
     if "usn" in data and data["usn"]:
         dup = await db.execute(
             select(Student.id).where(Student.usn == data["usn"], Student.id != s.id)
@@ -403,7 +403,6 @@ async def update_student_admin(
         if dup.scalar_one_or_none():
             raise HTTPException(status_code=409, detail="Email already exists")
 
-    # apply updates
     for k, v in data.items():
         if v is None:
             continue
@@ -422,137 +421,117 @@ async def update_student_admin(
     )
     certificates_count = cert_res.scalar() or 0
 
-    return StudentOut(
-        id=s.id,
-        name=s.name,
-        usn=s.usn,
-        branch=s.branch,
-        email=s.email,
-        student_type=str(s.student_type),
-        passout_year=s.passout_year,
-        admitted_year=s.admitted_year,
-        college=s.college,
-        faculty_mentor_name=(s.created_by_faculty.full_name if s.created_by_faculty else None),
+    return _student_out(
+        s,
         activities_count=int(activities_count),
         certificates_count=int(certificates_count),
     )
 
-class ManualActivityPointsIn(BaseModel):
-    """
-    Accepts both payload styles:
 
-    1) Set total:
-        { "mode": "SET_TOTAL", "new_total": 25, "reason": "..." }
-
-    2) Add/Subtract:
-        { "mode": "ADD_SUBTRACT", "delta": 5, "reason": "..." }
-        { "mode": "ADD", "delta": 5, "reason": "..." }
-        { "mode": "SUBTRACT", "delta": 5, "reason": "..." }
-
-    Also supports legacy:
-        { "mode": "...", "value": 25, "reason": "..." }
-    """
-    model_config = ConfigDict(extra="allow")
-
-    mode: str = Field(..., description="SET_TOTAL | ADD_SUBTRACT | ADD | SUBTRACT")
-    reason: str = Field(..., min_length=1)
-
-    # frontend-friendly fields
-    new_total: Optional[int] = None
-    delta: Optional[int] = None
-
-    # legacy support
-    value: Optional[int] = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize(cls, data: Any):
-        if not isinstance(data, dict):
-            return data
-
-        # normalize mode values coming from UI labels
-        m = str(data.get("mode", "")).strip().upper()
-        if m in ("ADD / SUBTRACT", "ADD_SUBTRACT", "ADD-SUBTRACT"):
-            m = "ADD_SUBTRACT"
-        elif m in ("SET TOTAL", "SET_TOTAL"):
-            m = "SET_TOTAL"
-        data["mode"] = m
-
-        # if frontend sends "value" for set total, map it
-        if data.get("new_total") is None and data.get("value") is not None:
-            data["new_total"] = data.get("value")
-
-        # if frontend sends "value" for delta, map it
-        if data.get("delta") is None and data.get("value") is not None and m in ("ADD", "SUBTRACT", "ADD_SUBTRACT"):
-            data["delta"] = data.get("value")
-
-        return data
-
-
-@admin_router.patch("/{student_id}/activity-points")
-async def admin_update_student_activity_points(
+# ─────────────────────────────────────────────────────────────
+# ADMIN ACTIVITY POINTS ROUTES
+# ─────────────────────────────────────────────────────────────
+@admin_router.get("/{student_id}/activity-points", response_model=StudentPointAdjustmentListOut)
+async def get_student_activity_points_admin(
     student_id: int,
-    payload: ManualActivityPointsIn,
     db: AsyncSession = Depends(get_db),
     current_admin: Admin = Depends(get_current_admin),
 ):
-    # ✅ IMPORTANT: lock ONLY student row (NO joins / no selectinload here)
-    res = await db.execute(
-        select(Student).where(Student.id == student_id).with_for_update()
-    )
-    s = res.scalar_one_or_none()
-    if not s:
-        raise HTTPException(status_code=404, detail="Student not found")
-
-    old_total = int(s.total_points_earned or 0)
-    mode = (payload.mode or "").strip().upper()
-
-    if mode == "SET_TOTAL":
-        if payload.new_total is None:
-            raise HTTPException(status_code=422, detail="new_total is required for SET_TOTAL")
-        new_total = int(payload.new_total)
-        delta = new_total - old_total
-
-    elif mode in ("ADD_SUBTRACT", "ADD", "SUBTRACT"):
-        if payload.delta is None:
-            raise HTTPException(status_code=422, detail="delta is required for ADD/SUBTRACT")
-        d = int(payload.delta)
-
-        if mode == "SUBTRACT":
-            d = -abs(d)
-        elif mode == "ADD":
-            d = abs(d)
-        # ADD_SUBTRACT keeps sign as given
-
-        delta = d
-        new_total = old_total + delta
-
-    else:
-        raise HTTPException(status_code=422, detail="mode must be SET_TOTAL | ADD_SUBTRACT | ADD | SUBTRACT")
-
-    if new_total < 0:
-        raise HTTPException(status_code=422, detail="total points cannot be negative")
-
-    s.total_points_earned = int(new_total)
-
-    db.add(
-        StudentPointAdjustment(
-            student_id=s.id,
-            delta_points=int(delta),
-            new_total_points=int(new_total),
-            reason=payload.reason.strip(),
-            created_by_admin_id=getattr(current_admin, "id", None),
+    try:
+        student, items = await get_student_point_adjustments(db, student_id=student_id)
+        return StudentPointAdjustmentListOut(
+            total_points=int(student.total_points_earned or 0),
+            items=[_point_item_out(x) for x in items],
         )
-    )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
-    await db.commit()
 
-    return {
-        "student_id": s.id,
-        "old_total": old_total,
-        "new_total": int(new_total),
-        "delta": int(delta),
-    }# ─────────────────────────────────────────────────────────────
+@admin_router.post("/{student_id}/activity-points", response_model=StudentPointAdjustmentWriteResponse)
+async def create_student_activity_point_admin(
+    student_id: int,
+    payload: StudentPointAdjustmentCreate,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    try:
+        item, total_points = await create_student_point_adjustment(
+            db,
+            student_id=student_id,
+            activity_name=payload.activity_name,
+            category=payload.category,
+            points=payload.points,
+            date=payload.date,
+            status=payload.status,
+            remarks=payload.remarks,
+            created_by_admin_id=current_admin.id,
+        )
+        return StudentPointAdjustmentWriteResponse(
+            total_points=int(total_points),
+            item=_point_item_out(item),
+        )
+    except ValueError as e:
+        msg = str(e)
+        if msg == "Student not found":
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+
+
+activity_points_admin_router = APIRouter(prefix="/admin/activity-points", tags=["Admin - Activity Points"])
+
+
+@activity_points_admin_router.put("/{adjustment_id}", response_model=StudentPointAdjustmentWriteResponse)
+async def update_student_activity_point_admin(
+    adjustment_id: int,
+    payload: StudentPointAdjustmentUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    try:
+        item, total_points = await update_student_point_adjustment(
+            db,
+            adjustment_id=adjustment_id,
+            activity_name=payload.activity_name,
+            category=payload.category,
+            points=payload.points,
+            date=payload.date,
+            status=payload.status,
+            remarks=payload.remarks,
+        )
+        return StudentPointAdjustmentWriteResponse(
+            total_points=int(total_points),
+            item=_point_item_out(item),
+        )
+    except ValueError as e:
+        msg = str(e)
+        if msg in {"Activity point entry not found", "Student not found"}:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+
+
+@activity_points_admin_router.delete("/{adjustment_id}")
+async def delete_student_activity_point_admin(
+    adjustment_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_admin: Admin = Depends(get_current_admin),
+):
+    try:
+        total_points = await delete_student_point_adjustment(
+            db,
+            adjustment_id=adjustment_id,
+        )
+        return {
+            "success": True,
+            "total_points": int(total_points),
+        }
+    except ValueError as e:
+        msg = str(e)
+        if msg in {"Activity point entry not found", "Student not found"}:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+
+
+# ─────────────────────────────────────────────────────────────
 # STUDENT ROUTES (PROFILE)
 # ─────────────────────────────────────────────────────────────
 student_router = APIRouter(prefix="/students", tags=["Student - Profile"])

@@ -29,6 +29,7 @@ from app.routes.students import (
     faculty_router as faculty_students_router,
     admin_router as admin_students_router,
     student_router as student_profile_router,
+    activity_points_admin_router,
 )
 from app.routes.face_routes import router as face_router
 from app.routes.admin_sessions import router as admin_sessions_router
@@ -40,8 +41,7 @@ from app.routes.student_certificates import router as student_certificates_route
 from app.routes.admin_dashboard import router as admin_dashboard_router
 from app.routes.admin_certificates import router as admin_certificates_router
 
-# ✅ NEW: HTTPS-safe MinIO proxy (serve images via API, not http://minio:9000)
-# Create this file: app/routes/public_minio.py (router prefix "/public/minio")
+# ✅ HTTPS-safe MinIO proxy
 from app.routes.public_minio import router as public_minio_router
 
 
@@ -81,15 +81,12 @@ default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-
     "http://31.97.230.171",
     "http://31.97.230.171:3000",
     "http://31.97.230.171:5173",
     "https://31.97.230.171",
     "https://31.97.230.171:3000",
     "https://31.97.230.171:5173",
-
-    # ✅ Vercel Admin domain
     "https://vikasana-admin.vercel.app",
 ]
 
@@ -123,6 +120,7 @@ app.include_router(faculty_main_router, prefix="/api")
 
 app.include_router(faculty_students_router, prefix="/api")
 app.include_router(admin_students_router, prefix="/api")
+app.include_router(activity_points_admin_router, prefix="/api")
 app.include_router(student_profile_router, prefix="/api")
 
 app.include_router(student_auth_router, prefix="/api")
@@ -141,15 +139,8 @@ app.include_router(student_certificates_router, prefix="/api")
 app.include_router(activity_summary_router, prefix="/api")
 app.include_router(face_router, prefix="/api")
 
-# ✅ Dashboard endpoints
 app.include_router(admin_dashboard_router, prefix="/api")
-
-# ✅ Admin certificates endpoints
 app.include_router(admin_certificates_router, prefix="/api")
-
-# ✅ NEW: Public MinIO proxy endpoints (use in UI for thumbnails, certificates, etc.)
-# Example:
-#   /api/public/minio/object?bucket=vikasana-event-thumbnails&object_name=thumbnails/2/xxx.png
 app.include_router(public_minio_router, prefix="/api")
 
 

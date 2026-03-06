@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
+
 class StudentPointAdjustment(Base):
     __tablename__ = "student_point_adjustments"
 
@@ -20,15 +21,15 @@ class StudentPointAdjustment(Base):
         index=True,
     )
 
-    # how many points changed (+10, -5, etc.)
+    # actual change in total points
     delta_points: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # total after change
+    # total after this change
     new_total_points: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    # old field; keep for compatibility if already used
     reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # admin who changed it (if you have admin/faculty id)
     created_by_admin_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -37,7 +38,13 @@ class StudentPointAdjustment(Base):
         nullable=False,
     )
 
-    # Optional: relationship back to Student (only if you want)
+    # ✅ new UI fields
+    activity_name: Mapped[str] = mapped_column(String(120), nullable=False, server_default="Manual Points")
+    category: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    activity_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="approved")
+    remarks: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     student = relationship("Student", back_populates="point_adjustments")
 
     __table_args__ = (
