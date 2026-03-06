@@ -10,6 +10,8 @@ from typing import List
 from fastapi import HTTPException
 from sqlalchemy import select, func, delete as sql_delete, update, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.core.cert_sign import sign_cert
@@ -1259,7 +1261,15 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
 
 
 async def list_event_submissions(db: AsyncSession, event_id: int):
-    q = await db.execute(select(EventSubmission).where(EventSubmission.event_id == event_id))
+    q = await db.execute(
+        select(EventSubmission)
+        .options(
+            selectinload(EventSubmission.photos),
+            selectinload(EventSubmission.student),
+        )
+        .where(EventSubmission.event_id == event_id)
+        .order_by(EventSubmission.id.desc())
+    )
     return q.scalars().all()
 
 
