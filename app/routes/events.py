@@ -300,7 +300,7 @@ async def student_event_draft(
 
 
 # ✅ FIXED: event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
-@router.post("/student/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
+@router.post("/student/events/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
