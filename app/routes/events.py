@@ -304,9 +304,22 @@ async def student_event_draft(
 async def upload_photos(
     submission_id: int,
     start_seq: int = Query(..., description="Starting sequence number, e.g., 1"),
-    images: List[UploadFile] = File(..., description="Upload multiple files with key 'images'"),
-    lats: List[float] = Form(..., description="Latitude per image (same order as images)"),
-    lngs: List[float] = Form(..., description="Longitude per image (same order as images)"),
+
+    # ✅ event-style fields
+    images: List[UploadFile] | None = File(None, description="Upload multiple files with key 'images'"),
+    lats: List[float] | None = Form(None, description="Latitude per image (same order as images)"),
+    lngs: List[float] | None = Form(None, description="Longitude per image (same order as images)"),
+
+    # ✅ legacy/mobile fallback fields
+    image: UploadFile | None = File(None),
+    file: UploadFile | None = File(None),
+    photo: UploadFile | None = File(None),
+
+    lat: float | None = Form(None),
+    lng: float | None = Form(None),
+    latitude: float | None = Form(None),
+    longitude: float | None = Form(None),
+
     db: AsyncSession = Depends(get_db),
     student=Depends(get_current_student),
 ):
@@ -328,8 +341,43 @@ async def upload_photos(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    if len(lats) != len(images) or len(lngs) != len(images):
-        raise HTTPException(status_code=422, detail="lats/lngs count must match number of images")
+    # ✅ normalize payload so both old and new app formats work
+    normalized_images: list[UploadFile] = []
+    normalized_lats: list[float] = []
+    normalized_lngs: list[float] = []
+
+    if images:
+        normalized_images = list(images)
+        normalized_lats = list(lats or [])
+        normalized_lngs = list(lngs or [])
+    else:
+        single_upload = image or file or photo
+        single_lat = lat if lat is not None else latitude
+        single_lng = lng if lng is not None else longitude
+
+        if single_upload is not None:
+            normalized_images = [single_upload]
+            normalized_lats = [float(single_lat if single_lat is not None else 0)]
+            normalized_lngs = [float(single_lng if single_lng is not None else 0)]
+
+    if not normalized_images:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "image file missing",
+                "expected": {
+                    "file_fields": ["images", "image", "file", "photo"],
+                    "lat_fields": ["lats", "lat", "latitude"],
+                    "lng_fields": ["lngs", "lng", "longitude"],
+                },
+            },
+        )
+
+    if len(normalized_lats) != len(normalized_images) or len(normalized_lngs) != len(normalized_images):
+        raise HTTPException(
+            status_code=422,
+            detail="lats/lngs count must match number of uploaded images"
+        )
 
     required_photos = int(getattr(ev, "required_photos", 3) or 3)
     if start_seq < 1 or start_seq > required_photos:
@@ -338,12 +386,11 @@ async def upload_photos(
     results: List[EventSubmissionPhoto] = []
     seq_no = start_seq
 
-    # geofence target
     target_lat = getattr(ev, "location_lat", None)
     target_lng = getattr(ev, "location_lng", None)
     radius_m = float(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
 
-    for idx, img in enumerate(images):
+    for idx, img in enumerate(normalized_images):
         if seq_no > required_photos:
             break
 
@@ -357,16 +404,16 @@ async def upload_photos(
             content_type=img.content_type or "application/octet-stream",
             filename=img.filename or f"event_{submission_id}_{seq_no}.jpg",
             student_id=student.id,
-            session_id=submission_id,  # ok for storage path; it's just a grouping id
+            session_id=submission_id,
         )
 
-        lat = float(lats[idx]) if lats[idx] is not None else None
-        lng = float(lngs[idx]) if lngs[idx] is not None else None
+        lat_val = float(normalized_lats[idx]) if normalized_lats[idx] is not None else None
+        lng_val = float(normalized_lngs[idx]) if normalized_lngs[idx] is not None else None
 
         dist = None
         in_geo = None
-        if target_lat is not None and target_lng is not None and lat is not None and lng is not None:
-            dist = _haversine_m(lat, lng, float(target_lat), float(target_lng))
+        if target_lat is not None and target_lng is not None and lat_val is not None and lng_val is not None:
+            dist = _haversine_m(lat_val, lng_val, float(target_lat), float(target_lng))
             in_geo = dist <= radius_m
 
         photo_res = await db.execute(
@@ -379,26 +426,26 @@ async def upload_photos(
 
         if existing:
             existing.image_url = image_url
-            existing.lat = lat
-            existing.lng = lng
+            existing.lat = lat_val
+            existing.lng = lng_val
             existing.distance_m = float(dist) if dist is not None else None
             existing.is_in_geofence = bool(in_geo) if in_geo is not None else None
-            photo = existing
+            photo_row = existing
         else:
-            photo = EventSubmissionPhoto(
+            photo_row = EventSubmissionPhoto(
                 submission_id=submission_id,
                 seq_no=seq_no,
                 image_url=image_url,
-                lat=lat,
-                lng=lng,
+                lat=lat_val,
+                lng=lng_val,
                 distance_m=float(dist) if dist is not None else None,
                 is_in_geofence=bool(in_geo) if in_geo is not None else None,
             )
-            db.add(photo)
+            db.add(photo_row)
 
         await db.commit()
-        await db.refresh(photo)
-        results.append(photo)
+        await db.refresh(photo_row)
+        results.append(photo_row)
         seq_no += 1
 
     return PhotosUploadOut(submission_id=submission_id, photos=results)
