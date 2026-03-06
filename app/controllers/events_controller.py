@@ -1260,12 +1260,12 @@ async def delete_event(db: AsyncSession, event_id: int) -> None:
     await db.commit()
 
 
+
 async def list_event_submissions(db: AsyncSession, event_id: int):
     q = await db.execute(
         select(EventSubmission)
         .options(
             selectinload(EventSubmission.photos),
-            selectinload(EventSubmission.student),
         )
         .where(EventSubmission.event_id == event_id)
         .order_by(EventSubmission.id.desc())
