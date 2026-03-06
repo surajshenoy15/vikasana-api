@@ -13,7 +13,7 @@ from sqlalchemy import select, func, delete as sql_delete, update, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
-
+from app.models.activity import ActivitySession, ActivityPhoto
 from app.core.config import settings
 from app.core.cert_sign import sign_cert
 from app.core.cert_pdf import build_certificate_pdf
@@ -296,6 +296,54 @@ async def get_student_event_draft_progress(db: AsyncSession, student_id: int, ev
         "photos": [{"seq_no": int(r[0]), "image_url": r[1]} for r in rows],
     }
 
+async def copy_event_photos_to_activity_session(
+    db: AsyncSession,
+    submission: EventSubmission,
+    session: ActivitySession,
+):
+    q = await db.execute(
+        select(EventSubmissionPhoto)
+        .where(EventSubmissionPhoto.submission_id == submission.id)
+        .order_by(EventSubmissionPhoto.seq_no.asc())
+    )
+    event_photos = q.scalars().all()
+
+    if not event_photos:
+        return
+
+    for p in event_photos:
+        existing = await db.execute(
+            select(ActivityPhoto).where(
+                ActivityPhoto.session_id == session.id,
+                ActivityPhoto.seq_no == p.seq_no,
+            )
+        )
+        already = existing.scalar_one_or_none()
+        if already:
+            already.image_url = p.image_url
+            already.lat = getattr(p, "lat", None)
+            already.lng = getattr(p, "lng", None)
+            already.captured_at = getattr(submission, "submitted_at", None) or datetime.now(timezone.utc)
+            already.distance_m = getattr(p, "distance_m", None)
+            already.is_in_geofence = getattr(p, "is_in_geofence", True)
+        else:
+            db.add(
+                ActivityPhoto(
+                    session_id=session.id,
+                    student_id=submission.student_id,
+                    seq_no=p.seq_no,
+                    image_url=p.image_url,
+                    lat=getattr(p, "lat", None),
+                    lng=getattr(p, "lng", None),
+                    captured_at=getattr(submission, "submitted_at", None) or datetime.now(timezone.utc),
+                    sha256=None,
+                    distance_m=getattr(p, "distance_m", None),
+                    is_in_geofence=getattr(p, "is_in_geofence", True),
+                    geo_flag_reason=None,
+                )
+            )
+
+    await db.commit()
 async def create_or_approve_activity_session_from_submission(
     db: AsyncSession,
     submission: EventSubmission,
@@ -303,10 +351,11 @@ async def create_or_approve_activity_session_from_submission(
 ):
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
-        return
+        return []
 
     start_utc, end_utc = _event_window_utc(event)
     now_utc = datetime.now(timezone.utc)
+    sessions = []
 
     for at_id in activity_type_ids:
         q = await db.execute(
@@ -323,12 +372,8 @@ async def create_or_approve_activity_session_from_submission(
             session.status = ActivitySessionStatus.APPROVED
             if session.submitted_at is None:
                 session.submitted_at = now_utc
-
             if session.duration_hours is None:
-                session.duration_hours = max(
-                    0.0,
-                    (end_utc - start_utc).total_seconds() / 3600.0
-                )
+                session.duration_hours = max(0.0, (end_utc - start_utc).total_seconds() / 3600.0)
         else:
             session = ActivitySession(
                 student_id=submission.student_id,
@@ -340,14 +385,15 @@ async def create_or_approve_activity_session_from_submission(
                 expires_at=end_utc,
                 submitted_at=now_utc,
                 status=ActivitySessionStatus.APPROVED,
-                duration_hours=max(
-                    0.0,
-                    (end_utc - start_utc).total_seconds() / 3600.0
-                ),
+                duration_hours=max(0.0, (end_utc - start_utc).total_seconds() / 3600.0),
             )
             db.add(session)
+            await db.flush()
+
+        sessions.append(session)
 
     await db.commit()
+    return sessions
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -1343,35 +1389,19 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # -----------------------------
-    # FACE RECOGNITION PLACE
-    # -----------------------------
-    # Add your face verification here later
-    # Example:
-    # face_ok = await verify_submission_faces(db, submission)
-    # if not face_ok:
-    #     raise HTTPException(status_code=400, detail="Face recognition failed")
-
-    # -----------------------------
-    # APPROVE SUBMISSION
-    # -----------------------------
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
 
-    # -----------------------------
-    # CREATE/APPROVE ACTIVITY SESSION
-    # -----------------------------
-    await create_or_approve_activity_session_from_submission(db, submission, event)
+    sessions = await create_or_approve_activity_session_from_submission(db, submission, event)
 
-    # -----------------------------
-    # GENERATE CERTIFICATE
-    # -----------------------------
+    for session in sessions:
+        await copy_event_photos_to_activity_session(db, submission, session)
+
     await _issue_certificates_for_event(db, event)
 
-    # reload with photos eagerly loaded
     q = await db.execute(
         select(EventSubmission)
         .options(selectinload(EventSubmission.photos))
