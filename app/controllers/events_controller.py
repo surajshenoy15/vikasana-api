@@ -382,6 +382,8 @@ async def create_face_check_for_activity_session(
             existing.raw_image_url = chosen_photo.image_url
         if existing.student_id != submission.student_id:
             existing.student_id = submission.student_id
+        if existing.total_faces is None:
+            existing.total_faces = 1
     else:
         db.add(
             ActivityFaceCheck(
@@ -389,16 +391,17 @@ async def create_face_check_for_activity_session(
                 session_id=session.id,
                 photo_id=chosen_photo.id,
                 matched=False,
+                cosine_score=0.0,
+                l2_score=0.0,
+                total_faces=1,
                 raw_image_url=chosen_photo.image_url,
                 processed_object=None,
                 reason="event_submission_import",
-                cosine_score=None,
-                l2_score=None,
-                total_faces=None,
             )
         )
 
     await db.commit()
+
 async def create_or_update_activity_session_from_submission(
     db: AsyncSession,
     submission: EventSubmission,
