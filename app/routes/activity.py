@@ -57,7 +57,7 @@ router = APIRouter(prefix="/student/activity", tags=["Student - Activity"])
 admin_router = APIRouter(prefix="/admin/activity", tags=["Admin - Activity"])
 legacy_router = APIRouter(prefix="/student", tags=["Student - Legacy"])
 
-AUTO_APPROVE_MIN_MATCHES = 3
+AUTO_APPROVE_MIN_MATCHES = 1
 MAX_PHOTOS_FOR_AUTO = 5
 
 
