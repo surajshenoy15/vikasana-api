@@ -45,39 +45,55 @@ def file_to_b64(file_bytes: bytes) -> str:
 
 def _extract_object_key(image_url: str) -> str:
     """
-    Accepts:
-    - "folder/file.jpg" (preferred)
-    - "http://host:9000/bucket/folder/file.jpg"
-    - "bucket/folder/file.jpg"
-    Returns "folder/file.jpg" key.
+    Converts any of these into plain object key:
+
+    - activities/7/62/file.jpg
+    - vikasana-activities/activities/7/62/file.jpg
+    - http://31.97.230.171:9000/vikasana-activities/activities/7/62/file.jpg
+    - https://31.97.230.171:9000/vikasana-activities/activities/7/62/file.jpg
+    - /vikasana-activities/activities/7/62/file.jpg
+
+    Returns:
+    - activities/7/62/file.jpg
     """
     s = (image_url or "").strip()
     if not s:
         raise ValueError("Empty image_url")
 
-    s = s.replace("\\", "/")
+    s = s.replace("\\", "/").lstrip("/")
 
-    # If full URL, remove protocol+domain
+    # full URL -> keep only path part
     if "://" in s:
-        parts = s.split("://", 1)[1].split("/", 1)
-        if len(parts) == 2:
-            s = parts[1]  # now "bucket/key..."
+        s = s.split("://", 1)[1]
+        if "/" in s:
+            s = s.split("/", 1)[1]
+        else:
+            raise ValueError(f"Invalid image_url: {image_url}")
 
-    # If starts with bucket name, strip it
-    for b in [
-        getattr(settings, "MINIO_BUCKET_ACTIVITIES", ""),
-        getattr(settings, "MINIO_FACE_BUCKET", ""),
-    ]:
-        if b and (s == b or s.startswith(b + "/")):
-            s = s[len(b):].lstrip("/")
-            break
+    bucket_names = [
+        getattr(settings, "MINIO_BUCKET_ACTIVITIES", "") or "",
+        getattr(settings, "MINIO_FACE_BUCKET", "") or "",
+    ]
 
-    return s
+    # strip repeated bucket prefixes if present
+    changed = True
+    while changed:
+        changed = False
+        for b in bucket_names:
+            if b and s.startswith(b + "/"):
+                s = s[len(b) + 1 :]
+                changed = True
+
+    return s.lstrip("/")
 
 
 async def read_image_bytes_from_minio(object_key_or_url: str) -> bytes:
     bucket = settings.MINIO_BUCKET_ACTIVITIES
     object_name = _extract_object_key(object_key_or_url)
+
+    print("MINIO READ bucket =", bucket)
+    print("MINIO READ raw    =", object_key_or_url)
+    print("MINIO READ object =", object_name)
 
     def _read():
         resp = minio_client.get_object(bucket, object_name)
