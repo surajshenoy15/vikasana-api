@@ -126,12 +126,12 @@ app.include_router(student_profile_router, prefix="/api")
 app.include_router(student_auth_router, prefix="/api")
 
 app.include_router(student_activity_router, prefix="/api")
+app.include_router(events_router, prefix="/api")   # ✅ move up before legacy
 app.include_router(student_legacy_router, prefix="/api")
 app.include_router(admin_activity_router, prefix="/api")
 
 app.include_router(admin_sessions_router, prefix="/api")
 app.include_router(activity_types_router, prefix="/api")
-app.include_router(events_router, prefix="/api")
 
 app.include_router(public_verify_router, prefix="/api")
 app.include_router(student_certificates_router, prefix="/api")
