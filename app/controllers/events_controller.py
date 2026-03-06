@@ -321,13 +321,17 @@ async def copy_event_photos_to_activity_session(
             )
         )
         already = existing.scalar_one_or_none()
+
+        _in_geo = getattr(p, "is_in_geofence", None)
+        is_in_geofence_val = bool(_in_geo) if _in_geo is not None else True
+
         if already:
             already.image_url = p.image_url
             already.lat = getattr(p, "lat", None)
             already.lng = getattr(p, "lng", None)
             already.captured_at = getattr(submission, "submitted_at", None) or datetime.now(timezone.utc)
             already.distance_m = getattr(p, "distance_m", None)
-            already.is_in_geofence = getattr(p, "is_in_geofence", True)
+            already.is_in_geofence = is_in_geofence_val
         else:
             db.add(
                 ActivityPhoto(
@@ -340,7 +344,7 @@ async def copy_event_photos_to_activity_session(
                     captured_at=getattr(submission, "submitted_at", None) or datetime.now(timezone.utc),
                     sha256=None,
                     distance_m=getattr(p, "distance_m", None),
-                    is_in_geofence=getattr(p, "is_in_geofence", True),
+                    is_in_geofence=is_in_geofence_val,
                     geo_flag_reason=None,
                 )
             )
