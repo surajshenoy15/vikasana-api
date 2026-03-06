@@ -345,10 +345,11 @@ async def copy_event_photos_to_activity_session(
             )
 
     await db.commit()
-async def create_or_approve_activity_session_from_submission(
+async def create_or_update_activity_session_from_submission(
     db: AsyncSession,
     submission: EventSubmission,
     event: Event,
+    target_status: ActivitySessionStatus,
 ):
     activity_type_ids = await _get_event_activity_type_ids(db, event.id)
     if not activity_type_ids:
@@ -370,11 +371,16 @@ async def create_or_approve_activity_session_from_submission(
         session = q.scalar_one_or_none()
 
         if session:
-            session.status = ActivitySessionStatus.APPROVED
-            if session.submitted_at is None:
-                session.submitted_at = now_utc
+            session.status = target_status
+
+            if target_status in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED]:
+                if session.submitted_at is None:
+                    session.submitted_at = getattr(submission, "submitted_at", None) or now_utc
+
             if session.duration_hours is None:
-                session.duration_hours = max(0.0, (end_utc - start_utc).total_seconds() / 3600.0)
+                session.duration_hours = max(
+                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
+                )
         else:
             session = ActivitySession(
                 student_id=submission.student_id,
@@ -384,9 +390,15 @@ async def create_or_approve_activity_session_from_submission(
                 session_code=secrets.token_hex(8),
                 started_at=start_utc,
                 expires_at=end_utc,
-                submitted_at=now_utc,
-                status=ActivitySessionStatus.APPROVED,
-                duration_hours=max(0.0, (end_utc - start_utc).total_seconds() / 3600.0),
+                submitted_at=(
+                    getattr(submission, "submitted_at", None) or now_utc
+                    if target_status in [ActivitySessionStatus.SUBMITTED, ActivitySessionStatus.APPROVED]
+                    else None
+                ),
+                status=target_status,
+                duration_hours=max(
+                    0.0, (end_utc - start_utc).total_seconds() / 3600.0
+                ),
             )
             db.add(session)
             await db.flush()
@@ -1396,7 +1408,26 @@ async def approve_submission(db: AsyncSession, submission_id: int):
 
     await db.commit()
 
-    sessions = await create_or_approve_activity_session_from_submission(db, submission, event)
+    sessions = await create_or_update_activity_session_from_submission(
+        db=db,
+        submission=submission,
+        event=event,
+        target_status=ActivitySessionStatus.APPROVED,
+    )
+
+    for session in sessions:
+        await copy_event_photos_to_activity_session(db, submission, session)
+
+    await _issue_certificates_for_event(db, event)
+
+    q = await db.execute(
+        select(EventSubmission)
+        .options(selectinload(EventSubmission.photos))
+        .where(EventSubmission.id == submission_id)
+    )
+    submission = q.scalar_one()
+
+    return submission
 
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
@@ -1597,5 +1628,19 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         submission.submitted_at = datetime.now(timezone.utc)
 
     await db.commit()
+    await db.refresh(submission)
+
+    # ✅ Create/update linked activity session as SUBMITTED
+    sessions = await create_or_update_activity_session_from_submission(
+        db=db,
+        submission=submission,
+        event=event,
+        target_status=ActivitySessionStatus.SUBMITTED,
+    )
+
+    # ✅ Copy event photos into activity session
+    for session in sessions:
+        await copy_event_photos_to_activity_session(db, submission, session)
+
     await db.refresh(submission)
     return submission
