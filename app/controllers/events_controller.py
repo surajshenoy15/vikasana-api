@@ -468,6 +468,8 @@ async def create_or_update_activity_session_from_submission(
 
     await db.commit()
     return sessions
+
+
 # =========================================================
 # ---------------------- CERT HELPERS ----------------------
 # =========================================================
@@ -713,14 +715,6 @@ async def _infer_activity_type_ids_from_sessions(
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
 
-# assumes these are already imported in your file:
-# Event, EventSubmission, ActivitySession, ActivityType, Certificate
-# settings, sign_cert, build_certificate_pdf, upload_certificate_pdf_bytes
-# _event_window_utc, _now_ist_naive, _academic_year_from_date
-# _get_event_activity_type_ids, _infer_activity_type_ids_from_sessions
-# _next_certificate_no
-
-
 async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     """
     ✅ FIXED PERMANENTLY:
@@ -740,9 +734,9 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # -----------------------
     q = await db.execute(
         select(EventSubmission).where(
-    EventSubmission.event_id == event.id,
-    func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
-)
+            EventSubmission.event_id == event.id,
+            func.lower(cast(EventSubmission.status, String)).in_(["approved", "expired"]),
+        )
     )
     submissions = q.scalars().all()
     if not submissions:
@@ -799,14 +793,6 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     # Helper: hours overlap
     # -----------------------
     async def _hours_in_window(student_id: int, at_id: int) -> float:
-        """
-        Sum overlapped hours inside [start_utc, end_utc] for APPROVED sessions.
-
-        ✅ IMPORTANT:
-        Some rows may have submitted_at/expires_at NULL even when APPROVED.
-        If we don't fallback, the filter `end >= start_utc` becomes NULL and kills the match.
-        So session_end = coalesce(submitted_at, expires_at, end_utc).
-        """
         session_end = func.coalesce(
             ActivitySession.submitted_at,
             ActivitySession.expires_at,
@@ -1020,6 +1006,7 @@ async def _issue_certificates_for_event(db: AsyncSession, event: Event) -> int:
     await db.commit()
     return issued
 
+
 # =========================================================
 # ---------------------- CERT LIST (STUDENT) ----------------
 # =========================================================
@@ -1088,6 +1075,7 @@ async def regenerate_event_certificates(db: AsyncSession, event_id: int):
 
     return {"event_id": event_id, "certificates_issued": issued}
 
+
 # =========================================================
 # ---------------------- THUMBNAIL -------------------------
 # =========================================================
@@ -1145,8 +1133,6 @@ async def create_event(db: AsyncSession, payload) -> dict:
     # required_photos safety
     # ─────────────────────────────────────────────
     required_photos = int(getattr(payload, "required_photos", 3) or 3)
-    # if you want ONLY 5 in backend too, change to:
-    # if required_photos != 5: raise HTTPException(...)
     if required_photos < 3 or required_photos > 5:
         raise HTTPException(status_code=422, detail="required_photos must be between 3 and 5")
 
@@ -1220,6 +1206,7 @@ async def create_event(db: AsyncSession, payload) -> dict:
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to create event: {str(e)}")
     
+
 # =========================================================
 # ---------------------- ADMIN: UPDATE EVENT --------------
 # =========================================================
@@ -1320,8 +1307,6 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         if not event.end_time:
             raise HTTPException(status_code=422, detail="end_time is required")
 
-        # end must be after start (same day; your _event_window helper handles wrap)
-        # But keep simple validation here:
         st = event.start_time if isinstance(event.start_time, time_type) else _parse_time(event.start_time)
         et = event.end_time if isinstance(event.end_time, time_type) else _parse_time(event.end_time)
         if st is None or et is None:
@@ -1345,9 +1330,7 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
             raise HTTPException(status_code=422, detail=f"Invalid activity_type_ids: {missing}")
 
         try:
-            # delete old
             await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
-            # insert new
             db.add_all([EventActivityType(event_id=event_id, activity_type_id=at_id) for at_id in new_ids])
         except Exception as e:
             await db.rollback()
@@ -1386,6 +1369,7 @@ async def update_event(db: AsyncSession, event_id: int, payload) -> dict:
         "activity_type_ids": new_ids,
     }
     
+
 async def end_event(db: AsyncSession, event_id: int):
     event = await db.get(Event, event_id)
     if not event:
@@ -1755,23 +1739,49 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             face_check.processed_object = processed_object
             face_check.reason = face_result.get("reason")
         else:
-            db.add(ActivityFaceCheck(
-                student_id=student_id,
-                session_id=session.id,
-                photo_id=chosen_photo.id,
-                raw_image_url=chosen_photo.image_url,
-                matched=any_matched,
-                cosine_score=face_result.get("cosine_score"),
-                l2_score=face_result.get("l2_score"),
-                total_faces=face_result.get("total_faces"),
-                processed_object=processed_object,
-                reason=face_result.get("reason"),
-            ))
+            db.add(
+                ActivityFaceCheck(
+                    student_id=student_id,
+                    session_id=session.id,
+                    photo_id=chosen_photo.id,
+                    raw_image_url=chosen_photo.image_url,
+                    matched=any_matched,
+                    cosine_score=face_result.get("cosine_score"),
+                    l2_score=face_result.get("l2_score"),
+                    total_faces=face_result.get("total_faces"),
+                    processed_object=processed_object,
+                    reason=face_result.get("reason"),
+                )
+            )
 
     await db.commit()
 
-    # Step 7: auto-approve if face matched
-    if any_matched:
+    # Step 7: ✅ geofence check + face check together
+    photo_geo_res = await db.execute(
+        select(EventSubmissionPhoto).where(
+            EventSubmissionPhoto.submission_id == submission_id
+        )
+    )
+    uploaded_photo_rows = photo_geo_res.scalars().all()
+
+    all_in_geofence = (
+        len(uploaded_photo_rows) >= required_photos
+        and all(bool(getattr(p, "is_in_geofence", False)) for p in uploaded_photo_rows)
+    )
+
+    geo_reasons = []
+    for p in uploaded_photo_rows:
+        if getattr(p, "is_in_geofence", None) is False:
+            dist = getattr(p, "distance_m", None)
+            if dist is not None:
+                geo_reasons.append(f"photo_{p.seq_no}_outside_{int(dist)}m")
+            else:
+                geo_reasons.append(f"photo_{p.seq_no}_outside_geofence")
+        elif getattr(p, "is_in_geofence", None) is None:
+            geo_reasons.append(f"photo_{p.seq_no}_gps_missing")
+
+    # ✅ auto approve only if face matched AND all uploaded photos are inside geofence
+    if any_matched and all_in_geofence:
         submission.status = "approved"
         if hasattr(submission, "approved_at"):
             submission.approved_at = datetime.now(timezone.utc)
@@ -1792,6 +1802,22 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
             await create_face_check_for_activity_session(db, submission, session)
 
         await _issue_certificates_for_event(db, event)
+
+    else:
+        # Keep in admin review queue
+        submission.status = "submitted"
+
+        reasons = []
+        if not any_matched:
+            reasons.append("face_mismatch")
+        if not all_in_geofence:
+            reasons.append("outside_geofence")
+
+        if hasattr(submission, "rejection_reason"):
+            combined = reasons + geo_reasons
+            submission.rejection_reason = ",".join(combined) if combined else None
+
+        await db.commit()
 
     await db.refresh(submission)
     return submission

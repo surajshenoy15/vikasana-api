@@ -33,6 +33,7 @@ from app.schemas.certificate import StudentCertificateOut
 
 from app.controllers.events_controller import (
     create_event,
+    update_event,  # ✅ use controller update logic
     delete_event,
     list_active_events,
     register_for_event,
@@ -46,6 +47,7 @@ from app.controllers.events_controller import (
     regenerate_event_certificates,
     auto_approve_event_from_sessions,
     get_student_event_draft_progress,
+    _ensure_event_window,  # ✅ enforce upload only during valid event window
 )
 
 router = APIRouter(tags=["Events"])
@@ -90,7 +92,7 @@ def _event_out_dict(ev: Event) -> dict:
         "venue_name": getattr(ev, "venue_name", None),
         "maps_url": getattr(ev, "maps_url", None),
 
-        # ✅ NEW: geofence fields (must exist in Event model + schema)
+        # ✅ geofence fields
         "location_lat": getattr(ev, "location_lat", None),
         "location_lng": getattr(ev, "location_lng", None),
         "geo_radius_m": int(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M),
@@ -163,43 +165,7 @@ async def admin_update_event_api(
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin),
 ):
-    res = await db.execute(select(Event).where(Event.id == event_id))
-    ev = res.scalar_one_or_none()
-    if not ev:
-        raise HTTPException(status_code=404, detail="Event not found")
-
-    ids = _normalize_activity_type_ids(payload)
-    if not ids:
-        raise HTTPException(status_code=422, detail="Please select at least 1 activity type for this event.")
-
-    ev.title = (payload.title or "").strip()
-    ev.description = (payload.description or "").strip() or None
-    ev.required_photos = int(payload.required_photos or 3)
-
-    ev.event_date = payload.event_date
-    ev.start_time = payload.start_time
-    ev.end_time = payload.end_time
-
-    ev.thumbnail_url = payload.thumbnail_url
-    ev.venue_name = (payload.venue_name or "").strip() or None
-    ev.maps_url = (payload.maps_url or "").strip() or None
-
-    # ✅ NEW: allow updating geofence too
-    ev.location_lat = float(getattr(payload, "location_lat", None)) if getattr(payload, "location_lat", None) is not None else None
-    ev.location_lng = float(getattr(payload, "location_lng", None)) if getattr(payload, "location_lng", None) is not None else None
-    ev.geo_radius_m = int(getattr(payload, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
-
-    # if one provided, require both
-    if (ev.location_lat is None) ^ (ev.location_lng is None):
-        raise HTTPException(status_code=422, detail="Both location_lat and location_lng are required together")
-
-    await db.execute(sql_delete(EventActivityType).where(EventActivityType.event_id == event_id))
-    for at_id in ids:
-        db.add(EventActivityType(event_id=event_id, activity_type_id=at_id))
-
-    await db.commit()
-    await db.refresh(ev)
-    return _event_out_dict(ev)
+    return await update_event(db, event_id, payload)
 
 
 @router.delete("/admin/events/{event_id}", status_code=204)
@@ -290,6 +256,7 @@ async def register_event(
 ):
     return await register_for_event(db, student.id, event_id)
 
+
 @router.get("/student/events/{event_id}/draft")
 async def student_event_draft(
     event_id: int,
@@ -299,7 +266,7 @@ async def student_event_draft(
     return await get_student_event_draft_progress(db, student.id, event_id)
 
 
-# ✅ FIXED: event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
+# ✅ event submission photos endpoint (uses EventSubmission/EventSubmissionPhoto)
 @router.post("/student/events/submissions/{submission_id}/photos", response_model=PhotosUploadOut)
 async def upload_photos(
     submission_id: int,
@@ -341,15 +308,18 @@ async def upload_photos(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # ✅ enforce event time window before allowing uploads
+    _ensure_event_window(ev)
+
     # ✅ normalize payload so both old and new app formats work
     normalized_images: list[UploadFile] = []
-    normalized_lats: list[float] = []
-    normalized_lngs: list[float] = []
+    normalized_lats: list[float | None] = []
+    normalized_lngs: list[float | None] = []
 
     if images:
         normalized_images = list(images)
-        normalized_lats = list(lats or [])
-        normalized_lngs = list(lngs or [])
+        normalized_lats = [float(x) if x is not None else None for x in (lats or [])]
+        normalized_lngs = [float(x) if x is not None else None for x in (lngs or [])]
     else:
         single_upload = image or file or photo
         single_lat = lat if lat is not None else latitude
@@ -357,8 +327,8 @@ async def upload_photos(
 
         if single_upload is not None:
             normalized_images = [single_upload]
-            normalized_lats = [float(single_lat if single_lat is not None else 0)]
-            normalized_lngs = [float(single_lng if single_lng is not None else 0)]
+            normalized_lats = [float(single_lat)] if single_lat is not None else [None]
+            normalized_lngs = [float(single_lng)] if single_lng is not None else [None]
 
     if not normalized_images:
         raise HTTPException(
@@ -390,6 +360,15 @@ async def upload_photos(
     target_lng = getattr(ev, "location_lng", None)
     radius_m = float(getattr(ev, "geo_radius_m", DEFAULT_EVENT_RADIUS_M) or DEFAULT_EVENT_RADIUS_M)
 
+    # ✅ if geofence is enabled, GPS is mandatory
+    if target_lat is not None and target_lng is not None:
+        for i in range(len(normalized_images)):
+            if normalized_lats[i] is None or normalized_lngs[i] is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="GPS latitude and longitude are required for this event",
+                )
+
     for idx, img in enumerate(normalized_images):
         if seq_no > required_photos:
             break
@@ -407,13 +386,13 @@ async def upload_photos(
             session_id=submission_id,
         )
 
-        lat_val = float(normalized_lats[idx]) if normalized_lats[idx] is not None else None
-        lng_val = float(normalized_lngs[idx]) if normalized_lngs[idx] is not None else None
+        lat_val = normalized_lats[idx]
+        lng_val = normalized_lngs[idx]
 
         dist = None
         in_geo = None
         if target_lat is not None and target_lng is not None and lat_val is not None and lng_val is not None:
-            dist = _haversine_m(lat_val, lng_val, float(target_lat), float(target_lng))
+            dist = _haversine_m(float(lat_val), float(lng_val), float(target_lat), float(target_lng))
             in_geo = dist <= radius_m
 
         photo_res = await db.execute(
@@ -426,8 +405,8 @@ async def upload_photos(
 
         if existing:
             existing.image_url = image_url
-            existing.lat = lat_val
-            existing.lng = lng_val
+            existing.lat = float(lat_val) if lat_val is not None else None
+            existing.lng = float(lng_val) if lng_val is not None else None
             existing.distance_m = float(dist) if dist is not None else None
             existing.is_in_geofence = bool(in_geo) if in_geo is not None else None
             photo_row = existing
@@ -436,8 +415,8 @@ async def upload_photos(
                 submission_id=submission_id,
                 seq_no=seq_no,
                 image_url=image_url,
-                lat=lat_val,
-                lng=lng_val,
+                lat=float(lat_val) if lat_val is not None else None,
+                lng=float(lng_val) if lng_val is not None else None,
                 distance_m=float(dist) if dist is not None else None,
                 is_in_geofence=bool(in_geo) if in_geo is not None else None,
             )
