@@ -529,6 +529,113 @@ async def _get_event_activity_type_ids(db: AsyncSession, event_id: int) -> list[
     )
     return [int(r[0]) for r in aq.all() if r and r[0] is not None]
 
+async def _calculate_submission_points(
+    db: AsyncSession,
+    submission: EventSubmission,
+    event: Event,
+) -> int:
+    activity_type_ids = await _get_event_activity_type_ids(db, event.id)
+    if not activity_type_ids:
+        return 0
+
+    start_utc, end_utc = _event_window_utc(event)
+    if end_utc <= start_utc:
+        end_utc = start_utc + timedelta(hours=6)
+
+    total_points = 0
+
+    at_q = await db.execute(
+        select(ActivityType).where(ActivityType.id.in_(activity_type_ids))
+    )
+    activity_types = {int(a.id): a for a in at_q.scalars().all()}
+
+    for at_id in activity_type_ids:
+        session_end = func.coalesce(
+            ActivitySession.submitted_at,
+            ActivitySession.expires_at,
+            end_utc,
+        )
+
+        hrs_q = await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(
+                        func.greatest(
+                            0.0,
+                            func.extract(
+                                "epoch",
+                                (
+                                    func.least(session_end, end_utc)
+                                    - func.greatest(ActivitySession.started_at, start_utc)
+                                ),
+                            ) / 3600.0,
+                        )
+                    ),
+                    0.0,
+                )
+            ).where(
+                ActivitySession.student_id == submission.student_id,
+                ActivitySession.activity_type_id == at_id,
+                func.lower(cast(ActivitySession.status, String)) == "approved",
+                ActivitySession.started_at <= end_utc,
+                session_end >= start_utc,
+            )
+        )
+
+        hours = float(hrs_q.scalar() or 0.0)
+        if hours <= 0:
+            continue
+
+        at = activity_types.get(int(at_id))
+        if not at:
+            continue
+
+        ppu = getattr(at, "points_per_unit", None)
+        hpu = getattr(at, "hours_per_unit", None)
+        max_points = getattr(at, "max_points", None)
+
+        points_awarded = 0
+        if ppu is not None and hpu:
+            try:
+                points_awarded = int(round((hours / float(hpu)) * float(ppu)))
+            except Exception:
+                points_awarded = 0
+
+        if max_points is not None:
+            try:
+                points_awarded = min(points_awarded, int(max_points))
+            except Exception:
+                pass
+
+        total_points += max(0, int(points_awarded))
+
+    return total_points
+
+
+async def _credit_submission_points_once(
+    db: AsyncSession,
+    submission: EventSubmission,
+    event: Event,
+) -> int:
+    if bool(getattr(submission, "points_credited", False)):
+        return int(getattr(submission, "awarded_points", 0) or 0)
+
+    total_points = await _calculate_submission_points(db, submission, event)
+
+    student = await db.get(Student, submission.student_id)
+    if not student:
+        return 0
+
+    student.total_points_earned = int(student.total_points_earned or 0) + int(total_points)
+    submission.awarded_points = int(total_points)
+    submission.points_credited = True
+
+    if getattr(submission, "approved_at", None) is None:
+        submission.approved_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    return total_points
+
 
 async def _eligible_students_from_sessions(
     db: AsyncSession,
@@ -1447,12 +1554,15 @@ async def approve_submission(db: AsyncSession, submission_id: int):
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # approve submission
     submission.status = "approved"
     if hasattr(submission, "approved_at"):
         submission.approved_at = datetime.now(timezone.utc)
 
     await db.commit()
+    await db.refresh(submission)
 
+    # create/update approved activity sessions
     sessions = await create_or_update_activity_session_from_submission(
         db=db,
         submission=submission,
@@ -1460,14 +1570,21 @@ async def approve_submission(db: AsyncSession, submission_id: int):
         target_status=ActivitySessionStatus.APPROVED,
     )
 
+    # copy event photos into activity session photos
     for session in sessions:
         await copy_event_photos_to_activity_session(db, submission, session)
 
+    # create/update face check rows
     for session in sessions:
         await create_face_check_for_activity_session(db, submission, session)
 
+    # ✅ CREDIT POINTS TO STUDENT TOTAL ONLY ONCE
+    await _credit_submission_points_once(db, submission, event)
+
+    # generate certificates
     await _issue_certificates_for_event(db, event)
 
+    # reload latest submission
     q = await db.execute(
         select(EventSubmission)
         .options(selectinload(EventSubmission.photos))
@@ -1636,7 +1753,6 @@ async def _trigger_face_verification_for_submission(submission_id: int) -> dict:
         print(f"[face-verify] Error for submission {submission_id}: {e}")
         return {"matched": False, "reason": str(e)}
 
-
 async def final_submit(db: AsyncSession, submission_id: int, student_id: int, description: str):
     q = await db.execute(
         select(EventSubmission).where(
@@ -1703,13 +1819,13 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
     for session in sessions:
         await create_face_check_for_activity_session(db, submission, session)
 
-    # Step 5: ✅ Run ACTUAL face verification via CV pipeline
+    # Step 5: run actual face verification
     print(f"[face-verify] Running face verification for submission {submission_id}...")
     face_result = await _trigger_face_verification_for_submission(submission_id)
     any_matched = bool(face_result.get("matched", False))
     print(f"[face-verify] Result: matched={any_matched}, reason={face_result.get('reason')}")
 
-    # Step 6: Update the ActivityFaceCheck rows with real results
+    # Step 6: update ActivityFaceCheck rows with actual result
     processed_object = face_result.get("processed_object")
     for session in sessions:
         photo_res = await db.execute(
@@ -1756,7 +1872,7 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
 
     await db.commit()
 
-    # Step 7: ✅ geofence check + face check together
+    # Step 7: geofence check + face check together
     photo_geo_res = await db.execute(
         select(EventSubmissionPhoto).where(
             EventSubmissionPhoto.submission_id == submission_id
@@ -1780,13 +1896,14 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         elif getattr(p, "is_in_geofence", None) is None:
             geo_reasons.append(f"photo_{p.seq_no}_gps_missing")
 
-    # ✅ auto approve only if face matched AND all uploaded photos are inside geofence
+    # Step 8: auto approve only if face matched AND all uploaded photos are inside geofence
     if any_matched and all_in_geofence:
         submission.status = "approved"
         if hasattr(submission, "approved_at"):
             submission.approved_at = datetime.now(timezone.utc)
 
         await db.commit()
+        await db.refresh(submission)
 
         sessions = await create_or_update_activity_session_from_submission(
             db=db,
@@ -1801,6 +1918,10 @@ async def final_submit(db: AsyncSession, submission_id: int, student_id: int, de
         for session in sessions:
             await create_face_check_for_activity_session(db, submission, session)
 
+        # ✅ IMPORTANT: credit points to student total only once
+        await _credit_submission_points_once(db, submission, event)
+
+        # generate certificates
         await _issue_certificates_for_event(db, event)
 
     else:

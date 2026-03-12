@@ -272,9 +272,12 @@ class SubmissionOut(BaseModel):
     description: Optional[str] = None
     created_at: datetime
     submitted_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+    awarded_points: int = 0
+    points_credited: bool = False
 
     model_config = ConfigDict(from_attributes=True)
-
 
 class AdminSubmissionOut(BaseModel):
     id: int
@@ -288,13 +291,13 @@ class AdminSubmissionOut(BaseModel):
     approved_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
 
-    # ✅ optional meta (if your controller adds them)
+    awarded_points: int = 0
+    points_credited: bool = False
+
     face_matched: Optional[bool] = None
     face_reason: Optional[str] = None
     cosine_score: Optional[float] = None
     flag_reason: Optional[str] = None
-
-    # ✅ Include photos if you want to return them in admin list/detail
     photos: Optional[List[EventSubmissionPhotoOut]] = None
 
     model_config = ConfigDict(from_attributes=True)

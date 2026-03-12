@@ -63,7 +63,6 @@ class Event(Base):
         lazy="selectin",
     )
 
-
 class EventSubmission(Base):
     __tablename__ = "event_submissions"
 
@@ -76,6 +75,12 @@ class EventSubmission(Base):
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     submitted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # ✅ ADD THESE
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    awarded_points = Column(Integer, nullable=False, default=0)
+    points_credited = Column(Boolean, nullable=False, default=False)
 
     event = relationship("Event", back_populates="submissions")
     photos = relationship("EventSubmissionPhoto", back_populates="submission")
